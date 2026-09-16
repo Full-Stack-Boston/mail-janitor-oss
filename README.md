@@ -1,30 +1,70 @@
 # Mail Janitor
 
-Open-source safe bulk mail cleanup (IMAP). Self-host with Docker Compose or a local venv.
+Safe bulk cleanup for large mailboxes. Headers-only local index, interactive rules, and an explicit confirm phrase before anything moves.
 
-Safe bulk cleanup for large mailboxes (Yahoo IMAP first; Gmail/others later).  
-Headers-only local index, interactive rules, review before anything moves.
+**Try it / fork it**
 
-## Why not Yahoo’s web UI?
+| | |
+|--|--|
+| Museum demo (Authentik-gated) | [mail-janitor.fullstackboston.com](https://mail-janitor.fullstackboston.com/guide) |
+| Open source | [github.com/Full-Stack-Boston/mail-janitor-oss](https://github.com/Full-Stack-Boston/mail-janitor-oss) |
 
-Hundreds of thousands of messages are painful there. Mail Janitor scans metadata over IMAP into SQLite, helps you invent rules from discovery stats, stages candidates, and only moves mail after you review and type a confirm phrase.
+Yahoo IMAP is the first-class pack; Zoho, Gmail IMAP, and generic IMAP are also available. Native Gmail API / Microsoft Graph are deferred until IMAP coverage is proven.
+
+## What it does
+
+Hundreds of thousands of messages are painful in a webmail UI. Mail Janitor:
+
+1. **Scans headers only** over IMAP into a per-profile SQLite index (`mail.db`) — resume-friendly, overnight-OK.
+2. **Discovers** senders, domains, list-unsubscribe patterns, and size/age shapes so you can invent rules.
+3. **Stages** candidates locally (mailbox untouched) from YAML keep/stage rules.
+4. **Reviews** in a guided UI (`/guide`) or advanced desk — deselect false positives, keep a sender, open a body only on request.
+5. **Applies** moves to a holding folder (`ready2delete` by default), with optional undo, then optional Trash (Yahoo auto-empties Trash after 7 days).
+
+Every move is appended to `profiles/<name>/audit.jsonl`. There is **no IMAP EXPUNGE** in v1 — moves only.
 
 ## Safety model (read this)
 
 1. **Scan never downloads bodies.** The index stores headers/size only.
-2. **Review list is metadata only.** Opening a message fetches the body **on request** (memory cache briefly; not written to `mail.db`).
-3. **Default apply target is `ready2delete`**, not Trash. You can undo from there back to the original folder.
+2. **Review list is metadata only.** Opening a message fetches the body **on request** (brief memory cache; not written to `mail.db`).
+3. **Default apply target is `ready2delete`**, not Trash. Undo returns mail to the original folder.
 4. **Trash is a separate step.** Yahoo **automatically empties Trash after 7 days** and you **cannot** change that ([Yahoo Help](https://help.yahoo.com/kb/trash-spam-folders-regularly-emptied-sln3518.html)). Use `to-trash` only when you accept that clock.
-5. **No IMAP EXPUNGE in v1.** Moves only.
-6. Every move is appended to `profiles/<name>/audit.jsonl`.
+5. Confirm phrases (exact): `MOVE TO READY2DELETE` · `UNDO FROM READY2DELETE` · `MOVE TO TRASH`
 
-Confirm phrases (exact):
+## Quick start (local)
 
-- `MOVE TO READY2DELETE`
-- `UNDO FROM READY2DELETE`
-- `MOVE TO TRASH`
+```bash
+git clone https://github.com/Full-Stack-Boston/mail-janitor-oss.git
+cd mail-janitor-oss
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 
-## Yahoo setup
+mail-janitor init-profile myyahoo
+# edit profiles/myyahoo/config.toml
+# edit profiles/myyahoo/.env  → MAIL_JANITOR_EMAIL + MAIL_JANITOR_APP_PASSWORD
+# (or use Get started → Connect in the UI)
+
+mail-janitor scan -p myyahoo
+mail-janitor discover -p myyahoo
+$EDITOR profiles/myyahoo/rules.yaml
+mail-janitor preview -p myyahoo
+mail-janitor stage -p myyahoo --clear
+mail-janitor review -p myyahoo
+# open http://127.0.0.1:8787/guide
+```
+
+Apply only after review:
+
+```bash
+mail-janitor preflight -p myyahoo
+mail-janitor apply -p myyahoo --confirm "MOVE TO READY2DELETE"
+# optional
+mail-janitor undo -p myyahoo --confirm "UNDO FROM READY2DELETE"
+mail-janitor to-trash -p myyahoo --confirm "MOVE TO TRASH" --batch-size 100
+```
+
+### Yahoo setup
 
 1. Enable **IMAP** in Yahoo Mail settings.
 2. Enable **two-step verification**.
@@ -34,57 +74,33 @@ Confirm phrases (exact):
 
 IMAP defaults: `imap.mail.yahoo.com:993` (SSL).
 
-## Install
+### Docker / dual ports
 
-```bash
-cd .
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
+See [`docker-compose.yml`](docker-compose.yml) and [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
-## Profile (multi-account)
+| Instance | Default port | Data | Purpose |
+|----------|--------------|------|---------|
+| Personal | `8787` | `profiles/` | Your live mailbox |
+| Demo / client | `8788` | ephemeral sessions | Authentik-gated museum / client product |
 
-```bash
-mail-janitor init-profile myyahoo
-# edit profiles/myyahoo/config.toml
-# edit profiles/myyahoo/.env  → MAIL_JANITOR_EMAIL + MAIL_JANITOR_APP_PASSWORD
-# (or use Get started → Connect in the UI)
-```
+Compose env knobs live in [`.env.example`](.env.example) (`MAIL_JANITOR_PROFILE`, ports, profile roots, optional Nathan ntfy).
 
-Each profile has isolated `mail.db`, `rules.yaml`, and `audit.jsonl`.
+## Configuration
 
-## Workflow
+### Profile layout
 
-```bash
-# 1) Headers-only scan (resume-friendly; overnight OK)
-mail-janitor scan -p myyahoo
+Each profile under `profiles/<name>/` is isolated:
 
-# 2) See what you have
-mail-janitor discover -p myyahoo
+| File | Role |
+|------|------|
+| `config.toml` | Provider pack, IMAP host/port, folder names |
+| `.env` | `MAIL_JANITOR_EMAIL`, `MAIL_JANITOR_APP_PASSWORD` (gitignored) |
+| `mail.db` | Headers-only SQLite index (gitignored) |
+| `rules.yaml` | Keep + stage rules |
+| `audit.jsonl` | Append-only move log |
+| `firewall.yaml` | Optional sender/domain firewall |
 
-# 3) Edit rules as you go
-$EDITOR profiles/myyahoo/rules.yaml
-mail-janitor preview -p myyahoo
-
-# 4) Stage candidates (local DB only — mailbox untouched)
-mail-janitor stage -p myyahoo --clear
-
-# 5) Review in the local UI
-mail-janitor review -p myyahoo
-# open http://127.0.0.1:8787/review
-# deselect false positives, Keep sender, Open body only when needed
-
-# 6) Apply (CLI or UI) — moves to ready2delete
-mail-janitor preflight -p myyahoo
-mail-janitor apply -p myyahoo --confirm "MOVE TO READY2DELETE"
-
-# 7) Optional undo while still in ready2delete
-mail-janitor undo -p myyahoo --confirm "UNDO FROM READY2DELETE"
-
-# 8) Optional: start the 7-day Trash clock in batches
-mail-janitor to-trash -p myyahoo --confirm "MOVE TO TRASH" --batch-size 100
-```
+Ship only `profiles/_example/` in public trees — see [`docs/SANITIZE.md`](docs/SANITIZE.md).
 
 ### Example `rules.yaml`
 
@@ -104,66 +120,49 @@ Keep-rules **always win** (excluded from staging/preview).
 
 Rule fields: `from_domain`, `from_address`, `subject_contains`, `older_than_days`, `folder`, `has_list_unsubscribe`, `min_size`, `match` (`all`/`any`).
 
-## Preview samples
-
-Sample rows are **from the SQLite header index** (from, subject, date, folder, size, uid).  
-They are **not** body peeks trimmed for display. Yahoo IMAP does not provide a Zoho-style snippet in headers.
-
-## Future providers
-
-IMAP packs: **Yahoo**, **Zoho**, **Gmail (IMAP)**, and **generic IMAP**.  
-Native Gmail API / Microsoft Graph are deferred until IMAP coverage is proven.
-
-## Guided UI (elderly-friendly)
+### Guided UI
 
 ```bash
 mail-janitor review -p myyahoo
-# open http://127.0.0.1:8787/guide
+# http://127.0.0.1:8787/guide
 ```
 
 **Get started** walks Connect → Scan → Protect → Clean → Done.  
 **Advanced** keeps Insights, Keep explorer, Suggested rules, and Rules.
 
-## Dual deploy (personal + generic review)
+Preview samples are **from the SQLite header index** (from, subject, date, folder, size, uid) — not body peeks. Yahoo IMAP does not provide a Zoho-style snippet in headers.
 
-See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+## How it was built (fork notes)
 
-- **Personal:** `http://127.0.0.1:8787/guide` (live profile under `profiles/`)
-- **Demo / review:** `http://127.0.0.1:8788/guide` (isolated `deploy/demo-profiles/`, example identity only)
+Stack is intentionally small and local-first:
 
-Mission Control card (after site deploy): `/portal/mail-janitor`
+| Layer | Choice |
+|-------|--------|
+| CLI | Click (`mail-janitor` entry point) |
+| Index | SQLite via stdlib (`db.py`) — headers/size/UID only |
+| IMAP | Python `imaplib` + provider packs under `providers/` (Yahoo, Zoho, Gmail IMAP, generic) |
+| Rules | YAML → matcher in `rules.py` / staging in `stage.py` |
+| Moves | `apply.py` with confirm phrases + `audit.py` JSONL |
+| UI | FastAPI + Jinja2 templates + static CSS/JS under `web/` |
+| Client product | `client_sessions.py` — ephemeral workspaces, TTL wipe, Authentik identity headers |
 
-## Mission Control deploy
+Useful seams if you fork:
 
-See `docker-compose.yml` and [`docs/SANITIZE.md`](docs/SANITIZE.md).  
-Personalized profiles stay on a private volume; the git tree only ships `profiles/_example/`.
+- **New provider:** add a pack in `src/mail_janitor/providers/` and register it in `packs.py`.
+- **New rule field:** extend the YAML schema + matcher in `rules.py`, cover with pytest (package is gated at **100%** coverage).
+- **UI flow:** templates in `src/mail_janitor/web/templates/`; guide vs advanced share the same API.
+- **Deploy:** personal `:8787` vs client `:8788` — see `docs/DEPLOY.md` and `scripts/run-dual.sh`.
 
-Status endpoint for cards: `GET /api/mission-control/status`.
-
-## Tests
+Tests:
 
 ```bash
 pytest
 ```
 
-## Vaultwarden (lab)
+## Lab / Mission Control (operators)
 
-Store the Yahoo IMAP app password as Login handle **`lab/mail-janitor-yahoo-imap`** (FSB/Machine) via Nathan `secrets.store` — do not paste it in chat.
+Status endpoint for cards: `GET /api/mission-control/status`.
+Portal card (after site deploy): `/portal/mail-janitor`.
 
-```bash
-# On fsb-03 (Nathan + bw unlock). Unlock file must exist:
-#   /opt/stacks/nathan/secrets/vw-master  (mode 600)
-. /opt/fsb/config/agent/cli.env
-export NATHAN_URL=http://127.0.0.1:9102
-
-# Option A — interactive prompt
-/opt/fsb/data/repos/mail-janitor/scripts/store-yahoo-imap-in-vault.sh --username 'you@yahoo.com'
-
-# Option B — staged file
-printf '%s' 'YAHOO_APP_PASSWORD' > /tmp/yahoo-imap-app-pw && chmod 600 /tmp/yahoo-imap-app-pw
-/opt/fsb/data/repos/mail-janitor/scripts/store-yahoo-imap-in-vault.sh \
-  --username 'you@yahoo.com' --password-file /tmp/yahoo-imap-app-pw
-shred -u /tmp/yahoo-imap-app-pw
-```
-
-Then put the same values in `profiles/<name>/.env` as `MAIL_JANITOR_EMAIL` + `MAIL_JANITOR_APP_PASSWORD` (local SoT for the tool).
+Personalized profiles stay on a private volume; this public tree only ships `profiles/_example/`.
+See [`docs/SANITIZE.md`](docs/SANITIZE.md) before publishing forks.
