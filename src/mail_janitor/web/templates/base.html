@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{% if theme == 'demo' %}light{% else %}dark{% endif %}" data-skin="{{ theme }}">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>{% block title %}Mail Janitor{% endblock %}</title>
+  <script>
+    (function () {
+      try {
+        var skin = {{ theme | tojson }};
+        document.documentElement.setAttribute("data-skin", skin);
+        if (skin === "demo") {
+          // Daylight default, but honor a saved preference (no flashbang lock-in).
+          var demoTheme = localStorage.getItem("mj-theme");
+          if (demoTheme !== "light" && demoTheme !== "dark") demoTheme = "light";
+          document.documentElement.setAttribute("data-theme", demoTheme);
+          return;
+        }
+        // Bust stale light preference from older skins — FSB default is dark.
+        var storedSkin = localStorage.getItem("mj-skin");
+        if (storedSkin !== "fsb-v2") {
+          localStorage.setItem("mj-skin", "fsb-v2");
+          localStorage.setItem("mj-theme", "dark");
+        }
+        var t = localStorage.getItem("mj-theme");
+        if (t !== "light" && t !== "dark") t = "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        document.documentElement.setAttribute(
+          "data-theme",
+          {{ ("light" if theme == "demo" else "dark") | tojson }}
+        );
+      }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  {% if theme == 'demo' %}
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Source+Sans+3:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>:root { --mail-pattern: url("{{ base_path }}/static/bg-mail-pattern.svg"); }</style>
+  <link rel="stylesheet" href="{{ base_path }}/static/style-demo.css?v=demo4" />
+  {% else %}
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;700&family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ base_path }}/static/style.css?v=fsb7" />
+  {% endif %}
+  <script src="{{ base_path }}/static/progress.js?v=fsb7"></script>
+  <script>
+    window.MJ_BASE = {{ (base_path or '') | tojson }};
+    (function () {
+      var BASE = window.MJ_BASE || "";
+      if (!BASE) return;
+      function withBase(url) {
+        if (typeof url !== "string") return url;
+        if (!url.startsWith("/") || url.startsWith("//") || url.startsWith(BASE + "/") || url === BASE) {
+          return url;
+        }
+        return BASE + url;
+      }
+      window.mjUrl = withBase;
+      window.mjNavigate = function (path) {
+        if (!path) return;
+        if (/^https?:\/\//i.test(path) || path.startsWith("//")) {
+          window.location.assign(path);
+          return;
+        }
+        // Already under the public base — don't double-prefix.
+        if (BASE && (path === BASE || path.startsWith(BASE + "/") || path.startsWith(BASE + "?"))) {
+          window.location.assign(path);
+          return;
+        }
+        if (path.startsWith("/")) {
+          window.location.assign(BASE + path);
+          return;
+        }
+        window.location.assign(BASE + "/" + path);
+      };
+      var origFetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        if (typeof input === "string") input = withBase(input);
+        else if (input && typeof input.url === "string" && typeof Request !== "undefined" && input instanceof Request) {
+          var u = withBase(input.url.replace(/^https?:\/\/[^/]+/, "") || input.url);
+          if (u !== input.url) input = new Request(u, input);
+        }
+        return origFetch(input, init);
+      };
+      function rewriteAnchors(root) {
+        (root || document).querySelectorAll("a[href^='/']").forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (!href || href.startsWith("//") || href.startsWith(BASE)) return;
+          a.setAttribute("href", BASE + href);
+        });
+      }
+      document.addEventListener(
+        "click",
+        function (e) {
+          var a = e.target && e.target.closest ? e.target.closest("a") : null;
+          if (!a) return;
+          var href = a.getAttribute("href");
+          if (!href || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("http")) return;
+          if (href.startsWith("/") && !href.startsWith(BASE)) {
+            a.setAttribute("href", BASE + href);
+          }
+        },
+        true
+      );
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function () { rewriteAnchors(document); });
+      } else {
+        rewriteAnchors(document);
+      }
+      // Catch links injected later (search results, protect list, etc.)
+      try {
+        new MutationObserver(function (muts) {
+          muts.forEach(function (m) {
+            m.addedNodes.forEach(function (n) {
+              if (n.nodeType !== 1) return;
+              if (n.matches && n.matches("a[href^='/']")) rewriteAnchors(n.parentNode || document);
+              else if (n.querySelectorAll) rewriteAnchors(n);
+            });
+          });
+        }).observe(document.documentElement, { childList: true, subtree: true });
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <header class="app-bar">
+    <div>
+      {% if is_client %}
+      <p class="kicker">Client session</p>
+      <h1><span class="brand-mark">Mail Janitor</span></h1>
+      <div class="meta">
+        Guided cleanup — we wipe your workspace after {{ session_ttl_hours|int }}h idle or when you end the session.
+        {% if profile.email and profile.email != 'you@example.com' %}
+          · Mailbox <strong>{{ profile.email }}</strong>
+        {% else %}
+          · Not connected to a mailbox yet
+        {% endif %}
+      </div>
+      {% elif is_demo %}
+      <p class="kicker">Public demo</p>
+      <h1><span class="brand-mark">Mail Janitor</span></h1>
+      <div class="meta">Try a guided inbox cleanup — nothing leaves until you confirm.</div>
+      {% else %}
+      <p class="kicker">Full Stack Boston</p>
+      <h1><span class="brand-mark">Mail Janitor</span></h1>
+      <div class="meta">
+        {% if profile.email and profile.email != 'you@example.com' %}
+          Signed in as <strong>{{ profile.email }}</strong>
+        {% else %}
+          Not signed in yet
+        {% endif %}
+        · <span id="inbox-remaining">Checking inbox…</span>
+      </div>
+      {% endif %}
+    </div>
+    <nav aria-label="Main">
+      <a href="{{ base_path }}/guide" class="{% if request.url.path.endswith('/guide') or request.url.path == base_path or request.url.path == base_path + '/' or request.url.path == '/' %}is-active{% endif %}">Home</a>
+      <a href="{{ base_path }}/review" class="{% if '/review' in request.url.path %}is-active{% endif %}">Review moves</a>
+      {% if profile_names|length > 1 and not is_demo and not is_client %}
+      <label class="muted" style="display:inline-flex;gap:0.35rem;align-items:center;font-size:0.85rem">
+        Mailbox
+        <select id="profile-switcher" style="max-width:10rem">
+          {% for name in profile_names %}
+          <option value="{{ name }}" {% if name == profile.name %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
+      <button type="button" class="secondary" id="theme-toggle" aria-label="Toggle light or dark">Theme</button>
+      {% if is_client %}
+      <button type="button" class="secondary" id="session-end-btn">End session &amp; erase</button>
+      {% endif %}
+      <a class="nav-quiet" href="{{ base_path }}/advanced">More tools</a>
+    </nav>
+  </header>
+  <main class="{% block main_class %}{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    (function () {
+      var btn = document.getElementById("theme-toggle");
+      if (btn) {
+        function label() {
+          var t = document.documentElement.getAttribute("data-theme") || "dark";
+          btn.textContent = t === "dark" ? "Light mode" : "Dark mode";
+        }
+        label();
+        btn.addEventListener("click", function () {
+          var cur = document.documentElement.getAttribute("data-theme") || "dark";
+          var next = cur === "dark" ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", next);
+          try { localStorage.setItem("mj-theme", next); } catch (e) {}
+          label();
+        });
+      }
+
+      var inboxEl = document.getElementById("inbox-remaining");
+      if (inboxEl) {
+        var lastInbox = null;
+        function fmt(n) {
+          try { return Number(n).toLocaleString(); } catch (e) { return String(n); }
+        }
+        async function refreshInbox() {
+          try {
+            var res = await fetch("/api/stats");
+            if (!res.ok) return;
+            var data = await res.json();
+            var n = data.inbox_count;
+            if (n == null) return;
+            var delta = lastInbox != null ? n - lastInbox : 0;
+            lastInbox = n;
+            var suffix = delta < 0 ? (" (−" + fmt(-delta) + " today)") : "";
+            inboxEl.textContent = fmt(n) + " messages left in Inbox" + suffix;
+            var insightInbox = document.getElementById("insight-inbox-count");
+            if (insightInbox) insightInbox.textContent = fmt(n);
+            var guideInbox = document.getElementById("guide-inbox");
+            if (guideInbox) guideInbox.textContent = fmt(n);
+            var doneInbox = document.getElementById("done-inbox");
+            if (doneInbox) doneInbox.textContent = fmt(n);
+          } catch (e) { /* ignore */ }
+        }
+        refreshInbox();
+        setInterval(refreshInbox, 8000);
+      }
+
+      var sw = document.getElementById("profile-switcher");
+      if (sw) {
+        sw.addEventListener("change", async function () {
+          var name = sw.value;
+          var res = await fetch("/api/profiles/switch", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ profile: name }),
+          });
+          if (res.ok) window.location.reload();
+        });
+      }
+
+      var endBtn = document.getElementById("session-end-btn");
+      if (endBtn) {
+        endBtn.addEventListener("click", async function () {
+          if (!window.confirm("Erase your Mail Janitor workspace on this server now? Your email provider is untouched.")) {
+            return;
+          }
+          endBtn.disabled = true;
+          try {
+            var res = await fetch("/api/session/end", { method: "POST" });
+            var data = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+              alert(data.detail || ("Could not end session (HTTP " + res.status + ")"));
+              endBtn.disabled = false;
+              return;
+            }
+            alert("Workspace erased. You can close this tab or connect again.");
+            window.location.assign((window.MJ_BASE || "") + "/guide");
+          } catch (e) {
+            alert("Could not end session");
+            endBtn.disabled = false;
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Inbound firewall — never auto-Trash.
+# Order: allow wins → block quarantines → optional heuristic → pass (leave in Inbox).
+# Quarantine folder is separate from ready2delete (janitor-reviewed cleanup).
+
+enabled: true
+watch_folder: Inbox
+quarantine_folder: quarantine
+poll_seconds: 60
+
+# Soft auto-quarantine from header heuristics (list-unsub / marketing-ish hosts).
+# Keep false until you've seeded allow rules for people you know.
+heuristic_quarantine: false
+
+allow: []
+# - id: allow-alice
+#   from_address: alice@example.com
+
+block: []
+# - id: block-spam-domain
+#   from_domain: messenger.tanga.com

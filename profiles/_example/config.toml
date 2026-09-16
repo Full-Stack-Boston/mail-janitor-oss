@@ -1,0 +1,39 @@
+# Copy this directory to profiles/<your-account-name>/ and edit.
+
+provider = "yahoo"
+email = "you@example.com"
+
+# IMAP (Yahoo defaults; override only if needed)
+# Large Yahoo folders: use export.imap.mail.yahoo.com (~100k+/folder vs ~10k on imap.mail.yahoo.com)
+imap_host = "imap.mail.yahoo.com"
+imap_port = 993
+imap_ssl = true
+
+# Folders to skip during scan (exact IMAP names)
+exclude_folders = ["Trash", "Bulk Mail", "Spam", "ready2delete", "Intentionally Kept"]
+
+# Active triage folder (stage rules default here when stage_inbox_only = true)
+inbox_folder = "Inbox"
+
+# Batch-apply destination for mail matching keep rules (created if missing)
+kept_folder = "Intentionally Kept"
+
+# Destination folder for approved deletes (created if missing)
+ready_folder = "ready2delete"
+
+# When true (and stage_folders unset), stage rules without an explicit folder
+# only match inbox_folder. Override with an explicit list, e.g.:
+# stage_folders = ["Inbox", "Sent", "Bulk"]
+stage_inbox_only = true
+
+# Trash folder name on this provider
+trash_folder = "Trash"
+
+# Preview sample size (metadata rows only)
+preview_sample_n = 20
+
+# Scan batch size (UIDs per FETCH)
+scan_batch_size = 500
+
+# Move batch size (UIDs per IMAP MOVE/COPY round-trip)
+move_batch_size = 200

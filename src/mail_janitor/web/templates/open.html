@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Open {{ uid }} — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Message body (on request)</h2>
+<p class="muted">Fetched live from IMAP for <span class="mono">{{ folder }}</span> UID <span class="mono">{{ uid }}</span>. Not written to mail.db.</p>
+<p><a href="{{ base_path }}/review">← Back to review</a></p>
+<pre id="body-viewer">Loading…</pre>
+{% endblock %}
+{% block scripts %}
+<script>
+(async () => {
+  const folder = {{ folder | tojson }};
+  const uid = {{ uid }};
+  const qs = new URLSearchParams({ folder, uid: String(uid) });
+  const res = await fetch('/api/open?' + qs.toString());
+  const el = document.getElementById('body-viewer');
+  if (!res.ok) {
+    el.textContent = 'Error: ' + await res.text();
+    return;
+  }
+  const data = await res.json();
+  el.textContent = data.body + (data.cached ? '\n\n[memory cache]' : '');
+})();
+</script>
+{% endblock %}

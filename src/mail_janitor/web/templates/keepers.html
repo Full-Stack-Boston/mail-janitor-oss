@@ -1,0 +1,790 @@
+{% extends "base.html" %}
+{% block title %}Keep explorer — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Keep explorer</h2>
+<p class="muted">
+  <strong>Indexed</strong> = all folders in the local index.
+  <strong>Inbox remaining</strong> (header) = Inbox only (~{{ stats.inbox_indexed }}).
+  <strong>Kept (rules)</strong> = indexed messages matching keep rules.
+  <strong>Inbox to file as kept</strong> = Inbox mail matching keep rules — batch-move to
+  <span class="mono">{{ profile.kept_folder }}</span>.
+  <strong>Not kept</strong> = eligible for cleanup. Goal: empty <span class="mono">{{ profile.inbox_folder }}</span>.
+</p>
+
+<section class="cards" id="keeper-stats">
+  <div class="card">
+    <div class="label">Indexed (all folders)</div>
+    <div class="value" id="stat-total">{{ stats.total_indexed }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Inbox (indexed)</div>
+    <div class="value" id="stat-inbox">{{ stats.inbox_indexed }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Kept by rules</div>
+    <div class="value" id="stat-kept">{{ stats.kept }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Not kept (cleanup-eligible)</div>
+    <div class="value" id="stat-not-kept">{{ stats.not_kept }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Evaluated</div>
+    <div class="value" id="stat-evaluated">{{ stats.evaluated }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Remain to review</div>
+    <div class="value" id="stat-remain">{{ stats.remain_to_review }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Keep rules</div>
+    <div class="value" id="stat-rules">{{ stats.keep_rule_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Stage rules</div>
+    <div class="value" id="stat-stage-rules">{{ stats.stage_rule_count }}</div>
+  </div>
+</section>
+
+<section class="preflight" style="margin:1rem 0" id="apply-kept-panel">
+  <h3 style="margin-top:0">Move kept mail out of Inbox</h3>
+  <p class="muted" style="font-size:0.95rem">
+    Batch-moves <strong>{{ kept_preflight.count }}</strong> message(s) in
+    <span class="mono">{{ profile.inbox_folder }}</span> that match keep rules →
+    <span class="mono">{{ profile.kept_folder }}</span> (created if missing).
+    Stage/cleanup folder scope is set on <a href="{{ base_path }}/suggestions">Suggested rules</a>
+    (default: <span class="mono">{{ profile.inbox_folder }}</span> only).
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem;align-items:flex-end">
+    <label style="font-size:0.9rem">
+      Type <span class="mono">{{ confirm_kept }}</span><br>
+      <input id="confirm-apply-kept" autocomplete="off" style="width:18rem" />
+    </label>
+    <button type="button" id="btn-apply-kept" {% if kept_preflight.count == 0 %}disabled{% endif %}>
+      Move {{ kept_preflight.count }} to kept folder
+    </button>
+  </div>
+  <p id="apply-kept-status" class="mono muted"></p>
+</section>
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">What keep rules protect</h3>
+  <p class="muted" style="font-size:0.95rem">
+    Sorted by how many indexed messages each rule shields. Click <strong>broad</strong>
+    on a row to see every sender it shields and keep only the ones you want
+    (e.g. whole <span class="mono">gmail.com</span> → specific people).
+  </p>
+  <table>
+    <thead><tr><th>Rule</th><th>Criteria</th><th>Messages</th><th>Senders</th><th>Sample</th><th></th></tr></thead>
+    <tbody id="keep-audit-body">
+    {% for a in keep_audit %}
+      <tr{% if a.broad %} style="outline:1px solid var(--warn, #c90)"{% endif %}>
+        <td class="mono">{{ a.rule_id }}{% if a.narrowable %} <button type="button" class="broad-drill warn" data-rule-id="{{ a.rule_id }}" data-criteria="{{ a.criteria }}">broad</button>{% elif a.broad %} <span class="warn">broad</span>{% endif %}</td>
+        <td class="mono">{{ a.criteria }}</td>
+        <td>{{ a.match_count }}</td>
+        <td>{{ a.senders }}</td>
+        <td class="subject" style="font-size:0.85rem">
+          {% for s in a.samples %}{{ s.from_addr }} — {{ s.subject[:40] }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+        </td>
+        <td><button type="button" class="secondary keep-del" data-rule-id="{{ a.rule_id }}">Remove</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<dialog id="broad-dialog" class="broad-dialog">
+  <form method="dialog" id="broad-dialog-form">
+    <h3 style="margin-top:0">Narrow broad keep rule</h3>
+    <p class="muted" id="broad-dialog-desc" style="font-size:0.95rem"></p>
+    <p class="muted warn" id="broad-page-hint" style="font-size:0.9rem"></p>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0">
+      <button type="button" class="secondary" id="broad-sel-all">Select all</button>
+      <button type="button" class="secondary" id="broad-sel-none">Select none</button>
+      <span id="broad-sel-count" class="muted mono"></span>
+    </div>
+    <div class="broad-sender-scroll">
+      <table>
+        <thead><tr><th></th><th>Sender</th><th>Messages</th><th>Latest</th><th>Sample subject</th></tr></thead>
+        <tbody id="broad-sender-body"></tbody>
+      </table>
+    </div>
+    <div class="toolbar" style="justify-content:flex-end;gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
+      <button type="button" class="secondary" id="broad-page-prev">Prev</button>
+      <span id="broad-page-label" class="mono muted"></span>
+      <button type="button" class="secondary" id="broad-page-next">Next</button>
+      <button type="button" class="secondary" value="cancel">Cancel</button>
+      <button type="button" id="broad-apply" disabled title="Visit every page first">Keep checked senders only</button>
+    </div>
+    <p id="broad-result" class="mono muted"></p>
+  </form>
+</dialog>
+
+<section class="preflight warn" style="margin:1rem 0">
+  <h3 style="margin-top:0">Reset rules (start over)</h3>
+  <p class="muted" style="font-size:0.95rem">
+    Backs up <span class="mono">rules.yaml</span> before clearing. Does not move or delete mailbox mail.
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:1rem;align-items:flex-end">
+    <label style="font-size:0.9rem">
+      Type <span class="mono">{{ reset_keep_phrase }}</span><br>
+      <input id="confirm-reset-keep" autocomplete="off" style="width:16rem" />
+      <button type="button" class="danger" id="btn-reset-keep">Clear all keep rules</button>
+    </label>
+    <label style="font-size:0.9rem">
+      Type <span class="mono">{{ reset_stage_phrase }}</span><br>
+      <input id="confirm-reset-stage" autocomplete="off" style="width:16rem" />
+      <button type="button" class="danger" id="btn-reset-stage">Clear all stage rules</button>
+    </label>
+    <button type="button" class="secondary" id="btn-reset-review">Clear staged queue + evaluated marks</button>
+  </div>
+  <p id="reset-result" class="mono muted"></p>
+</section>
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">Quick keep by domain suffix</h3>
+  <p class="muted" style="font-size:0.95rem">One rule covers every sender on that suffix (e.g. all <span class="mono">*.edu</span>).</p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem;align-items:center">
+    <button type="button" class="secondary suffix-preview" data-suffix=".edu">Preview .edu</button>
+    <button type="button" class="secondary suffix-preview" data-suffix=".gov">Preview .gov</button>
+    <button type="button" class="secondary suffix-preview" data-suffix=".org">Preview .org</button>
+    <label>Suffix
+      <input type="text" id="suffix-input" placeholder=".edu" style="width:6rem" />
+    </label>
+    <button type="button" id="btn-suffix-preview" class="secondary">Preview</button>
+    <button type="button" id="btn-suffix-keep">Add keep rule for suffix</button>
+    <span id="suffix-result" class="mono muted"></span>
+  </div>
+</section>
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">Search</h3>
+  <form id="search-form" class="toolbar" style="flex-wrap:wrap;gap:0.75rem;align-items:flex-end">
+    <label>Domain suffix<br>
+      <input name="domain_suffix" id="q-suffix" placeholder=".edu" style="width:6rem" />
+    </label>
+    <label>Domain contains<br>
+      <input name="domain_contains" id="q-domain" placeholder="bonaloop" style="width:10rem" />
+    </label>
+    <label>From contains<br>
+      <input name="from_contains" id="q-from" placeholder="name@" style="width:10rem" />
+    </label>
+    <label>Subject contains<br>
+      <input name="subject_contains" id="q-subject" placeholder="boy scouts" style="width:12rem" />
+    </label>
+    <label>Body keyword (IMAP, slow)<br>
+      <input name="body_keyword" id="q-body" placeholder="bonaloop" style="width:12rem" />
+    </label>
+    <label>Folder<br>
+      <input name="folder" id="q-folder" placeholder="Inbox" style="width:8rem" />
+    </label>
+    <label><input type="checkbox" name="not_kept_only" id="q-not-kept" checked /> Not kept only</label>
+    <label><input type="checkbox" name="unseen_only" id="q-unseen" /> Unreviewed only</label>
+    <button type="submit">Search</button>
+    <button type="button" class="secondary" id="btn-refresh-blank">Repair blank From/Subject</button>
+  </form>
+  <p class="muted" style="font-size:0.9rem;margin:0.35rem 0 0">
+    If rows show size but empty From/Subject, click <strong>Repair blank From/Subject</strong>
+    (re-fetches headers — Open still works because it loads the full message).
+  </p>
+  <p id="search-summary" class="muted" style="margin:0.5rem 0"></p>
+</section>
+
+<div class="action-bar">
+  <span id="sel-count" class="muted">0 selected</span>
+  <button type="button" class="secondary" id="sel-all-page">Select page</button>
+  <button type="button" class="secondary" id="sel-none-page">Select none</button>
+  <button type="button" class="secondary" id="btn-mark-seen">Mark selected evaluated</button>
+  <button type="button" id="btn-keep-senders">Keep selected senders</button>
+  <button type="button" class="secondary" id="btn-keep-domains">Keep selected domains</button>
+  <button type="button" class="secondary" id="btn-keep-subject">Keep subject contains (search)</button>
+  <span id="action-result" class="mono muted"></span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th></th>
+      <th>Eval</th>
+      <th>Date</th>
+      <th>From</th>
+      <th>Domain</th>
+      <th>Subject</th>
+      <th>Folder</th>
+      <th>Size</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody id="results-body">
+    <tr><td colspan="9" class="muted">Run a search to see messages.</td></tr>
+  </tbody>
+</table>
+<div class="toolbar" id="pager" style="display:none">
+  <button type="button" class="secondary" id="page-prev">Prev</button>
+  <span id="page-label" class="mono muted"></span>
+  <button type="button" class="secondary" id="page-next">Next</button>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const PAGE_SIZE = 100;
+const BROAD_PAGE_SIZE = 100;
+let searchOffset = 0;
+let searchTotal = 0;
+let lastSearch = {};
+let lastSubjectTerm = '';
+let broadRuleId = '';
+let broadCriteria = '';
+let broadOffset = 0;
+let broadTotalSenders = 0;
+let broadExcluded = new Set();
+let broadPagesVisited = new Set();
+
+function refreshStats() {
+  fetch('/api/keepers/stats').then(r => r.json()).then(s => {
+    document.getElementById('stat-total').textContent = s.total_indexed;
+    const inboxEl = document.getElementById('stat-inbox');
+    if (inboxEl) inboxEl.textContent = s.inbox_indexed ?? '—';
+    document.getElementById('stat-kept').textContent = s.kept;
+    document.getElementById('stat-not-kept').textContent = s.not_kept;
+    document.getElementById('stat-evaluated').textContent = s.evaluated;
+    document.getElementById('stat-remain').textContent = s.remain_to_review;
+    document.getElementById('stat-rules').textContent = s.keep_rule_count;
+    const stEl = document.getElementById('stat-stage-rules');
+    if (stEl) stEl.textContent = s.stage_rule_count ?? '—';
+  }).catch(() => {});
+}
+
+function bindKeepDelButtons() {
+  document.querySelectorAll('.keep-del').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', async () => {
+      if (!confirm('Remove keep rule ' + btn.dataset.ruleId + '?')) return;
+      const res = await fetch('/api/rules/keep/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ rule_id: btn.dataset.ruleId }),
+      });
+      if (res.ok) location.reload();
+      else alert(await res.text());
+    });
+  });
+}
+
+function broadTagHtml(a) {
+  if (a.narrowable) {
+    return ` <button type="button" class="broad-drill warn" data-rule-id="${a.rule_id}" data-criteria="${a.criteria || ''}">broad</button>`;
+  }
+  if (a.broad) return ' <span class="warn">broad</span>';
+  return '';
+}
+
+function renderKeepAudit(rules) {
+  const body = document.getElementById('keep-audit-body');
+  if (!body) return;
+  if (!rules?.length) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">No keep rules with matches.</td></tr>';
+    return;
+  }
+  body.innerHTML = rules.map(a => {
+    const broad = a.broad ? ' style="outline:1px solid var(--warn, #c90)"' : '';
+    const samples = (a.samples || []).map(s =>
+      `${s.from_addr || ''} — ${(s.subject || '').slice(0, 40)}`
+    ).join('<br>');
+    return `<tr${broad}>
+      <td class="mono">${a.rule_id}${broadTagHtml(a)}</td>
+      <td class="mono">${a.criteria || ''}</td>
+      <td>${a.match_count}</td>
+      <td>${a.senders}</td>
+      <td class="subject" style="font-size:0.85rem">${samples}</td>
+      <td><button type="button" class="secondary keep-del" data-rule-id="${a.rule_id}">Remove</button></td>
+    </tr>`;
+  }).join('');
+  bindKeepDelButtons();
+  bindBroadDrillButtons();
+}
+
+function bindBroadDrillButtons() {
+  document.querySelectorAll('.broad-drill').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', () => openBroadDialog(btn.dataset.ruleId, btn.dataset.criteria));
+  });
+}
+
+function broadPageCount() {
+  return Math.max(1, Math.ceil(broadTotalSenders / BROAD_PAGE_SIZE));
+}
+
+function broadAllPagesVisited() {
+  return broadPagesVisited.size >= broadPageCount();
+}
+
+function updateBroadApplyState() {
+  const btn = document.getElementById('broad-apply');
+  const hint = document.getElementById('broad-page-hint');
+  const pages = broadPageCount();
+  const visited = broadPagesVisited.size;
+  if (btn) btn.disabled = !broadAllPagesVisited();
+  if (hint) {
+    hint.textContent = broadAllPagesVisited()
+      ? `Reviewed all ${pages} page(s). You can apply — unchecked senders across every page will be dropped from keep.`
+      : `Visit every page before applying (${visited} of ${pages} reviewed). Use Prev/Next — applying early affects the whole domain, not just this page.`;
+  }
+}
+
+function updateBroadSelCount() {
+  const kept = Math.max(0, broadTotalSenders - broadExcluded.size);
+  document.getElementById('broad-sel-count').textContent =
+    `${kept} of ${broadTotalSenders} senders will be kept · ${broadExcluded.size} excluded`;
+  updateBroadApplyState();
+}
+
+function renderBroadSenders(data) {
+  const body = document.getElementById('broad-sender-body');
+  const rows = data.senders || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="muted">No senders found.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(s => {
+    const extra = s.has_address_keep ? ' <span class="muted">(also has address keep)</span>' : '';
+    const checked = !broadExcluded.has(s.from_addr);
+    return `<tr>
+      <td><input type="checkbox" class="broad-sender-pick" ${checked ? 'checked' : ''} data-addr="${s.from_addr}" /></td>
+      <td class="mono">${s.from_addr}${extra}</td>
+      <td>${s.message_count}</td>
+      <td class="mono">${s.latest_human || ''}</td>
+      <td class="subject">${(s.sample_subject || '').slice(0, 60)}</td>
+    </tr>`;
+  }).join('');
+  body.querySelectorAll('.broad-sender-pick').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) broadExcluded.delete(cb.dataset.addr);
+      else broadExcluded.add(cb.dataset.addr);
+      updateBroadSelCount();
+    });
+  });
+  updateBroadSelCount();
+  const page = Math.floor(broadOffset / BROAD_PAGE_SIZE) + 1;
+  const pages = Math.max(1, Math.ceil(broadTotalSenders / BROAD_PAGE_SIZE));
+  document.getElementById('broad-page-label').textContent = `Page ${page} / ${pages} · ${broadTotalSenders} senders`;
+  document.getElementById('broad-page-prev').disabled = broadOffset <= 0;
+  document.getElementById('broad-page-next').disabled = broadOffset + BROAD_PAGE_SIZE >= broadTotalSenders;
+}
+
+async function loadBroadSenders(offset = 0) {
+  const body = document.getElementById('broad-sender-body');
+  body.innerHTML = '<tr><td colspan="5" class="muted">Loading senders…</td></tr>';
+  const qs = new URLSearchParams({
+    rule_id: broadRuleId,
+    limit: String(BROAD_PAGE_SIZE),
+    offset: String(offset),
+  });
+  const res = await fetch('/api/keepers/broad-senders?' + qs.toString());
+  const data = await res.json();
+  if (!res.ok) {
+    body.innerHTML = `<tr><td colspan="5" class="muted">${data.detail || 'Failed to load senders'}</td></tr>`;
+    return;
+  }
+  broadOffset = offset;
+  broadTotalSenders = data.total_senders || 0;
+  broadPagesVisited.add(Math.floor(offset / BROAD_PAGE_SIZE));
+  renderBroadSenders(data);
+}
+
+async function openBroadDialog(ruleId, criteria) {
+  broadRuleId = ruleId;
+  broadCriteria = criteria || ruleId;
+  broadOffset = 0;
+  broadExcluded = new Set();
+  broadPagesVisited = new Set();
+  document.getElementById('broad-result').textContent = '';
+  document.getElementById('broad-dialog-desc').textContent =
+    `Rule ${ruleId} shields all mail from ${criteria}. Uncheck senders you do NOT want kept. ` +
+    'Applying removes this broad rule and adds individual keep rules for checked senders only.';
+  const dlg = document.getElementById('broad-dialog');
+  dlg.showModal();
+  await loadBroadSenders(0);
+}
+
+async function loadKeepAudit() {
+  const body = document.getElementById('keep-audit-body');
+  if (!body) return;
+  if (body.querySelector('tr:not([data-loading])')) {
+    bindBroadDrillButtons();
+    return;
+  }
+  body.innerHTML = '<tr data-loading="1"><td colspan="6" class="muted">Loading keep rule breakdown…</td></tr>';
+  try {
+    const res = await fetch('/api/keepers/keep-audit');
+    if (!res.ok) {
+      body.innerHTML = '<tr><td colspan="6" class="muted">Keep audit unavailable — restart the review UI to load the latest code.</td></tr>';
+      return;
+    }
+    const data = await res.json();
+    renderKeepAudit(data.rules || []);
+  } catch {
+    body.innerHTML = '<tr><td colspan="6" class="muted">Failed to load keep rule breakdown.</td></tr>';
+  }
+}
+
+bindKeepDelButtons();
+bindBroadDrillButtons();
+
+document.getElementById('broad-sel-all')?.addEventListener('click', () => {
+  broadExcluded = new Set();
+  document.querySelectorAll('.broad-sender-pick').forEach(cb => { cb.checked = true; });
+  updateBroadSelCount();
+});
+document.getElementById('broad-sel-none')?.addEventListener('click', async () => {
+  if (!confirm('Exclude every sender in this domain from keep rules?')) return;
+  const qs = new URLSearchParams({ rule_id: broadRuleId, limit: '500', offset: '0' });
+  let offset = 0;
+  broadExcluded = new Set();
+  while (true) {
+    qs.set('offset', String(offset));
+    const res = await fetch('/api/keepers/broad-senders?' + qs.toString());
+    const data = await res.json();
+    if (!res.ok) break;
+    for (const s of data.senders || []) broadExcluded.add(s.from_addr);
+    if (offset + (data.senders?.length || 0) >= (data.total_senders || 0)) break;
+    offset += BROAD_PAGE_SIZE;
+  }
+  document.querySelectorAll('.broad-sender-pick').forEach(cb => { cb.checked = false; });
+  updateBroadSelCount();
+});
+document.getElementById('broad-page-prev')?.addEventListener('click', () => {
+  loadBroadSenders(Math.max(0, broadOffset - BROAD_PAGE_SIZE));
+});
+document.getElementById('broad-page-next')?.addEventListener('click', () => {
+  loadBroadSenders(broadOffset + BROAD_PAGE_SIZE);
+});
+document.getElementById('broad-apply')?.addEventListener('click', async () => {
+  if (!broadAllPagesVisited()) {
+    alert(`Review all ${broadPageCount()} pages first (visited ${broadPagesVisited.size}).`);
+    return;
+  }
+  const kept = Math.max(0, broadTotalSenders - broadExcluded.size);
+  const msg = broadExcluded.size
+    ? `Replace broad keep for ${broadCriteria} with ${kept} per-sender keep rule(s)? ` +
+      `${broadExcluded.size} sender(s) will become cleanup-eligible.`
+    : `Replace broad keep for ${broadCriteria} with per-sender keeps for all ${kept} senders?`;
+  if (!confirm(msg)) return;
+  const el = document.getElementById('broad-result');
+  el.textContent = 'Applying…';
+  const res = await fetch('/api/keepers/narrow-keep', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      rule_id: broadRuleId,
+      exclude_addresses: [...broadExcluded],
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = data.detail || 'Failed';
+    return;
+  }
+  el.textContent = `Done — ${data.kept_senders} sender keep rule(s) added, ${data.excluded_senders} excluded.`;
+  setTimeout(() => location.reload(), 1000);
+});
+
+async function rulesReset(payload) {
+  const el = document.getElementById('reset-result');
+  el.textContent = 'Working…';
+  const res = await fetch('/api/rules/reset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = typeof data.detail === 'string' ? data.detail : 'Failed';
+    return;
+  }
+  el.textContent = JSON.stringify(data, null, 2);
+  setTimeout(() => location.reload(), 1200);
+}
+document.getElementById('btn-reset-keep')?.addEventListener('click', () => {
+  rulesReset({
+    keep: true,
+    confirm: document.getElementById('confirm-reset-keep')?.value || '',
+    backup: true,
+  });
+});
+document.getElementById('btn-reset-stage')?.addEventListener('click', () => {
+  rulesReset({
+    stage: true,
+    confirm: document.getElementById('confirm-reset-stage')?.value || '',
+    backup: true,
+  });
+});
+document.getElementById('btn-reset-review')?.addEventListener('click', () => {
+  if (!confirm('Clear staged review queue and evaluated marks?')) return;
+  rulesReset({ review_state: true, clear_staged: true, clear_evaluated: true });
+});
+
+function formParams() {
+  const fd = new FormData(document.getElementById('search-form'));
+  return {
+    domain_suffix: fd.get('domain_suffix') || '',
+    domain_contains: fd.get('domain_contains') || '',
+    from_contains: fd.get('from_contains') || '',
+    subject_contains: fd.get('subject_contains') || '',
+    body_keyword: fd.get('body_keyword') || '',
+    folder: fd.get('folder') || '',
+    not_kept_only: !!document.getElementById('q-not-kept').checked,
+    unseen_only: !!document.getElementById('q-unseen').checked,
+  };
+}
+
+function selectedRows() {
+  return [...document.querySelectorAll('.row-pick:checked')].map(cb => ({
+    folder: cb.dataset.folder,
+    uid: Number(cb.dataset.uid),
+    from: cb.dataset.from,
+    domain: cb.dataset.domain,
+  }));
+}
+
+function updateSelCount() {
+  document.getElementById('sel-count').textContent =
+    selectedRows().length + ' selected';
+}
+
+function renderRows(data) {
+  const body = document.getElementById('results-body');
+  body.innerHTML = '';
+  const rows = data.rows || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="muted">No matches.</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="checkbox" class="row-pick"
+        data-folder="${r.folder}" data-uid="${r.uid}"
+        data-from="${r.from_addr || ''}" data-domain="${r.from_domain || ''}" /></td>
+      <td class="mono">${r.evaluated ? 'yes' : '—'}</td>
+      <td class="mono">${r.date_human || ''}</td>
+      <td class="mono">${r.from_addr || ''}</td>
+      <td class="mono">${r.from_domain || ''}</td>
+      <td class="subject">${r.subject || ''}</td>
+      <td class="mono">${r.folder || ''}</td>
+      <td>${r.size_human || ''}</td>
+      <td><a href="{{ base_path }}/open?folder=${encodeURIComponent(r.folder)}&uid=${r.uid}">Open</a></td>`;
+    body.appendChild(tr);
+    tr.querySelector('.row-pick').addEventListener('change', updateSelCount);
+  }
+  updateSelCount();
+}
+
+async function runSearch(offset = 0) {
+  const p = formParams();
+  lastSearch = p;
+  lastSubjectTerm = p.subject_contains || '';
+  const qs = new URLSearchParams({
+    limit: String(PAGE_SIZE),
+    offset: String(offset),
+    not_kept_only: p.not_kept_only ? '1' : '0',
+    unseen_only: p.unseen_only ? '1' : '0',
+  });
+  for (const [k, v] of Object.entries(p)) {
+    if (v && k !== 'not_kept_only' && k !== 'unseen_only') qs.set(k, v);
+  }
+  const el = document.getElementById('search-summary');
+  el.textContent = 'Searching…';
+  const res = await fetch('/api/keepers/search?' + qs.toString());
+  const data = await res.json();
+  if (!res.ok) {
+    el.textContent = data.detail || 'Search failed';
+    return;
+  }
+  searchOffset = offset;
+  searchTotal = data.total || 0;
+  const mode = data.mode === 'imap_body' ? ' (IMAP body)' : '';
+  el.textContent = `${data.total} match(es)${mode} · ${data.senders || 0} senders · ${data.domains || 0} domains`;
+  renderRows(data);
+  const pager = document.getElementById('pager');
+  if (searchTotal > PAGE_SIZE) {
+    pager.style.display = 'flex';
+    const page = Math.floor(offset / PAGE_SIZE) + 1;
+    const pages = Math.max(1, Math.ceil(searchTotal / PAGE_SIZE));
+    document.getElementById('page-label').textContent = `Page ${page} / ${pages}`;
+    document.getElementById('page-prev').disabled = offset <= 0;
+    document.getElementById('page-next').disabled = offset + PAGE_SIZE >= searchTotal;
+  } else {
+    pager.style.display = 'none';
+  }
+}
+
+document.getElementById('search-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  runSearch(0);
+});
+document.getElementById('btn-refresh-blank')?.addEventListener('click', async () => {
+  const el = document.getElementById('search-summary');
+  el.textContent = 'Repairing blank headers via IMAP…';
+  const res = await fetch('/api/refresh-blank-headers', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = data.detail || 'Repair failed';
+    return;
+  }
+  el.textContent = `Repaired ${data.repaired || 0} · still blank ${data.still_blank || 0} · missing on server ${data.missing_on_server || 0}`;
+  runSearch(0);
+  refreshStats();
+});
+document.getElementById('page-prev')?.addEventListener('click', () => {
+  runSearch(Math.max(0, searchOffset - PAGE_SIZE));
+});
+document.getElementById('page-next')?.addEventListener('click', () => {
+  runSearch(searchOffset + PAGE_SIZE);
+});
+
+document.getElementById('sel-all-page')?.addEventListener('click', () => {
+  document.querySelectorAll('.row-pick').forEach(c => { c.checked = true; });
+  updateSelCount();
+});
+document.getElementById('sel-none-page')?.addEventListener('click', () => {
+  document.querySelectorAll('.row-pick').forEach(c => { c.checked = false; });
+  updateSelCount();
+});
+
+async function previewSuffix(suffix) {
+  const el = document.getElementById('suffix-result');
+  el.textContent = '…';
+  const res = await fetch('/api/keepers/suffix-preview?suffix=' + encodeURIComponent(suffix));
+  const data = await res.json();
+  if (!res.ok) { el.textContent = data.detail || 'Failed'; return; }
+  el.textContent = `${data.suffix}: ${data.not_kept_matches} not-kept msgs · ${data.senders} senders · ${data.domains} domains`;
+  return data;
+}
+
+document.querySelectorAll('.suffix-preview').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('suffix-input').value = btn.dataset.suffix;
+    previewSuffix(btn.dataset.suffix);
+  });
+});
+document.getElementById('btn-suffix-preview')?.addEventListener('click', () => {
+  previewSuffix(document.getElementById('suffix-input').value);
+});
+document.getElementById('btn-suffix-keep')?.addEventListener('click', async () => {
+  const suffix = document.getElementById('suffix-input').value;
+  const el = document.getElementById('suffix-result');
+  const res = await fetch('/api/keepers/keep-suffix', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ suffix }),
+  });
+  const data = await res.json();
+  if (!res.ok) { el.textContent = data.detail || 'Failed'; return; }
+  el.textContent = `Keep rule ${data.rule_id} added`;
+  refreshStats();
+});
+
+document.getElementById('btn-mark-seen')?.addEventListener('click', async () => {
+  const items = selectedRows();
+  if (!items.length) return;
+  const res = await fetch('/api/keepers/mark-seen', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ items: items.map(i => ({ folder: i.folder, uid: i.uid })) }),
+  });
+  const data = await res.json();
+  document.getElementById('action-result').textContent =
+    data.ok ? `Marked ${data.updated} evaluated` : 'Failed';
+  refreshStats();
+  runSearch(searchOffset);
+});
+
+async function keepSelections(kind) {
+  const rows = selectedRows();
+  const el = document.getElementById('action-result');
+  if (kind === 'subject') {
+    const term = lastSubjectTerm || formParams().subject_contains;
+    if (!term) { el.textContent = 'Enter subject_contains in search first'; return; }
+    const res = await fetch('/api/keepers/keep-bulk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ kind: 'subject_contains', value: term }),
+    });
+    const data = await res.json();
+    el.textContent = res.ok ? `Keep rule: ${data.rule_id}` : (data.detail || 'Failed');
+    refreshStats();
+    return;
+  }
+  if (!rows.length) { el.textContent = 'Select rows first'; return; }
+  const values = kind === 'from_address'
+    ? [...new Set(rows.map(r => r.from).filter(Boolean))]
+    : [...new Set(rows.map(r => r.domain).filter(Boolean))];
+  const res = await fetch('/api/keepers/keep-bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ kind, values }),
+  });
+  const data = await res.json();
+  el.textContent = res.ok
+    ? `Added ${data.created?.length || 0} keep rule(s)`
+    : (data.detail || 'Failed');
+  refreshStats();
+}
+
+document.getElementById('btn-keep-senders')?.addEventListener('click', () => keepSelections('from_address'));
+document.getElementById('btn-keep-domains')?.addEventListener('click', () => keepSelections('from_domain'));
+document.getElementById('btn-keep-subject')?.addEventListener('click', () => keepSelections('subject'));
+
+async function pollApplyKept() {
+  const el = document.getElementById('apply-kept-status');
+  if (!el) return;
+  let st;
+  try {
+    const res = await fetch('/api/apply/status');
+    st = await res.json();
+  } catch {
+    el.textContent = 'Status check slow — job may still be running (watch Inbox count in header).';
+    setTimeout(pollApplyKept, 5000);
+    return;
+  }
+  if (st.state === 'running' && st.job === 'apply-kept') {
+    const eta = st.eta?.summary || '';
+    const moved = st.progress?.moved_this_job ?? 0;
+    const total = st.progress?.total_planned ?? st.preflight?.count ?? '?';
+    el.textContent = [st.message, eta, `${moved}/${total} moved`].filter(Boolean).join(' · ');
+    setTimeout(pollApplyKept, 2500);
+    return;
+  }
+  if (st.state === 'done' && st.job === 'apply-kept' && st.result) {
+    el.textContent = `Done — moved ${st.result.moved}. Reloading…`;
+    setTimeout(() => location.reload(), 1200);
+    return;
+  }
+  if (st.state === 'error' && st.job === 'apply-kept') {
+    el.textContent = st.error || 'Failed';
+  }
+}
+
+document.getElementById('btn-apply-kept')?.addEventListener('click', async () => {
+  const el = document.getElementById('apply-kept-status');
+  const confirm = document.getElementById('confirm-apply-kept')?.value || '';
+  el.textContent = 'Starting…';
+  const fd = new FormData();
+  fd.set('confirm', confirm);
+  const res = await fetch('/api/apply-kept', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = data.detail || 'Failed to start';
+    return;
+  }
+  pollApplyKept();
+});
+
+refreshStats();
+loadKeepAudit();
+</script>
+{% endblock %}

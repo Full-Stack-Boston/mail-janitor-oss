@@ -1,0 +1,87 @@
+# Dual deploy: personalized (your mailbox) + generic review (demo only).
+# Profiles stay on private volumes — never bake identity into the image.
+#
+# Local process fallback (no Docker):
+#   ./scripts/run-dual.sh
+#
+# Compose (when Docker available on host):
+#   cp .env.example .env && docker compose up -d --build
+
+services:
+  mail-janitor-personal:
+    build: .
+    image: mail-janitor:local
+    container_name: mail-janitor-personal
+    restart: unless-stopped
+    ports:
+      - "${MAIL_JANITOR_PERSONAL_PORT:-8787}:8787"
+    environment:
+      MAIL_JANITOR_PROFILE: ${MAIL_JANITOR_PROFILE:-demo}
+      MAIL_JANITOR_PROFILES_DIR: /data/profiles
+      NATHAN_URL: ${NATHAN_URL:-}
+      NATHAN_API_KEY: ${NATHAN_API_KEY:-}
+      MAIL_JANITOR_NTFY_TOPIC: ${MAIL_JANITOR_NTFY_TOPIC:-mail-janitor}
+    volumes:
+      - ${MAIL_JANITOR_PERSONAL_PROFILES:-./profiles}:/data/profiles
+    command:
+      [
+        "mail-janitor",
+        "review",
+        "-p",
+        "${MAIL_JANITOR_PROFILE:-demo}",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8787",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/mission-control/status', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  mail-janitor-demo:
+    build: .
+    image: mail-janitor:local
+    container_name: mail-janitor-demo
+    restart: unless-stopped
+    ports:
+      - "${MAIL_JANITOR_DEMO_PORT:-8788}:8787"
+    environment:
+      MAIL_JANITOR_PROFILE: demo
+      MAIL_JANITOR_PROFILES_DIR: /data/profiles
+      # No Nathan pings from the generic review instance
+      NATHAN_URL: ""
+      NATHAN_API_KEY: ""
+    volumes:
+      - ${MAIL_JANITOR_DEMO_PROFILES:-./deploy/demo-profiles}:/data/profiles
+    command:
+      [
+        "mail-janitor",
+        "review",
+        "-p",
+        "demo",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8787",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/mission-control/status', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

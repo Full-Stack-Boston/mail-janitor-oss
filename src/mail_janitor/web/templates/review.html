@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block title %}Review — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Review staged emails</h2>
+<p class="muted">
+  Final double-check. <strong>{{ preflight.count }}</strong> are staged for move
+  (out of <strong>{{ indexed_total }}</strong> indexed in the mailbox) —
+  that is the <em>full</em> staged set from your rules, not a page size.
+</p>
+
+<section class="preflight action-bar" style="top:3.6rem">
+  <div>
+    <strong>Ready to move (entire staged set):</strong>
+    {{ preflight.count }} messages · {{ preflight.bytes_human }}
+    → <span class="mono">{{ profile.ready_folder }}</span>
+  </div>
+  <form id="apply-form" class="toolbar" style="margin:0" action="javascript:void(0)" onsubmit="return false;"
+    data-confirm-phrase="{{ confirm_ready }}">
+    <label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9rem">
+      Type this exact phrase, then click the button:
+      <input id="confirm-input" name="confirm" value="" autocomplete="off"
+        placeholder="{{ confirm_ready }}" size="32" required />
+    </label>
+    <button type="button" class="danger" id="apply-btn">Move all {{ preflight.count }} included (one shot)</button>
+  </form>
+  <div class="warn" style="margin:0;flex:1 1 100%">
+    Phrase: <span class="mono">{{ confirm_ready }}</span>
+    · One click moves <strong>all {{ preflight.count }}</strong> included messages (can take several minutes over IMAP — progress appears below).
+  </div>
+  <p id="apply-status-line" class="mono" style="flex:1 1 100%;margin:0">Status: {{ apply_status.state }}</p>
+  <pre id="apply-result" class="mono" style="flex:1 1 100%;margin:0;max-height:10rem;overflow:auto"></pre>
+</section>
+
+<form class="toolbar" method="get">
+  <input name="q" value="{{ q }}" placeholder="filter subject/from (server)" />
+  <input name="rule_id" value="{{ rule_id }}" placeholder="rule_id" />
+  <input name="from_domain" value="{{ from_domain }}" placeholder="from_domain" />
+  <label><input type="checkbox" name="show_excluded" value="1" {% if show_excluded %}checked{% endif %} /> show deselected</label>
+  <label>Sort
+    <select name="sort">
+      <option value="date" {% if sort != 'triage' %}selected{% endif %}>Date (oldest first)</option>
+      <option value="triage" {% if sort == 'triage' %}selected{% endif %}>Triage (keep-leaning first)</option>
+    </select>
+  </label>
+  <label>List mode
+    <select name="show_all">
+      <option value="0" {% if not show_all %}selected{% endif %}>Paginate (100 / page)</option>
+      <option value="1" {% if show_all %}selected{% endif %}>First 500 only (not full list)</option>
+    </select>
+  </label>
+  <button type="submit">Apply filters</button>
+  <a class="btn secondary" href="{{ base_path }}/export.csv">CSV</a>
+</form>
+{% if show_all_capped %}
+<p class="warn">List capped at 500 of {{ total }} staged rows so the page can load. Filters/pagination still work — the move button always uses the full {{ preflight.count }} included set.</p>
+{% endif %}
+
+<div class="toolbar">
+  <button type="button" id="select-all">Check all visible</button>
+  <button type="button" class="secondary" id="select-none">Uncheck visible</button>
+  <button type="button" id="deselect-selected" class="secondary">Exclude checked</button>
+  <button type="button" id="include-selected" class="secondary">Include checked</button>
+  <button type="button" id="include-all-staged">Include ALL staged</button>
+  <button type="button" class="secondary" id="exclude-all-staged">Exclude ALL staged</button>
+</div>
+
+<p class="muted">Showing {{ rows|length }} of {{ total }} staged row(s){% if show_all %} · full list{% else %} · page {{ page }}/{{ pages }}{% endif %}.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th></th>
+      <th>In</th>
+      <th>Triage</th>
+      <th>Date</th>
+      <th>From</th>
+      <th>Subject</th>
+      <th>Folder</th>
+      <th>Size</th>
+      <th>Attach?</th>
+      <th>Rule</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr data-folder="{{ r.folder }}" data-uid="{{ r.uid }}" data-from="{{ r.from_addr }}"
+        data-triage="{{ r.triage_confidence or '' }}">
+      <td><input type="checkbox" class="row-check" /></td>
+      <td>{{ 'yes' if r.included else 'no' }}</td>
+      <td class="mono" title="score {{ r.triage_score }}{% if r.triage_flags %} · {{ r.triage_flags|join(', ') }}{% endif %}">
+        {{ r.triage_confidence or '—' }}
+      </td>
+      <td class="mono">{{ r.date_human }}</td>
+      <td class="mono">{{ r.from_addr }}</td>
+      <td class="subject">{{ r.subject }}</td>
+      <td class="mono">{{ r.folder }}</td>
+      <td>{{ r.size_human }}</td>
+      <td class="mono">{% if r.has_attachment == 1 %}yes{% elif r.has_attachment == 0 %}no{% else %}?{% endif %}</td>
+      <td class="mono">{{ r.rule_id }}</td>
+      <td>
+        <a href="{{ base_path }}/open?folder={{ r.folder | urlencode }}&uid={{ r.uid }}">Open</a>
+        ·
+        <button type="button" class="secondary keep-btn" data-from="{{ r.from_addr }}">Keep sender</button>
+        ·
+        <button type="button" class="secondary toggle-btn" data-included="{{ 0 if r.included else 1 }}">
+          {{ 'Exclude' if r.included else 'Include' }}
+        </button>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="11" class="muted">No staged rows. Approve suggested rules first, then stage them.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if not show_all %}
+<div class="pager">
+  <span>Page {{ page }} / {{ pages }}</span>
+  {% if page > 1 %}
+    <a href="?page={{ page - 1 }}&q={{ q }}&rule_id={{ rule_id }}&from_domain={{ from_domain }}{% if show_excluded %}&show_excluded=1{% endif %}&show_all=0">Prev</a>
+  {% endif %}
+  {% if page < pages %}
+    <a href="?page={{ page + 1 }}&q={{ q }}&rule_id={{ rule_id }}&from_domain={{ from_domain }}{% if show_excluded %}&show_excluded=1{% endif %}&show_all=0">Next</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+const filterState = {
+  q: {{ q | tojson }},
+  rule_id: {{ rule_id | tojson }},
+  from_domain: {{ from_domain | tojson }},
+};
+const confirmPhrase = document.getElementById('apply-form')?.dataset.confirmPhrase
+  || {{ confirm_ready | tojson }};
+const statusLine = document.getElementById('apply-status-line');
+const resultEl = document.getElementById('apply-result');
+const applyBtn = document.getElementById('apply-btn');
+let applyPoll = null;
+
+function renderApplyStatus(s) {
+  let line = 'Status: ' + s.state;
+  if (s.message) line += ' — ' + s.message;
+  if (s.eta && s.eta.eta_human && s.eta.eta_human !== '—') {
+    line += ' · ETA ' + s.eta.eta_human;
+  }
+  statusLine.textContent = line;
+  if (s.state === 'running') {
+    resultEl.textContent = JSON.stringify({
+      eta: s.eta,
+      progress: s.progress,
+      moves_done: s.moves_done,
+      staged_remaining: s.staged_remaining,
+      seconds_since_last_ok: s.seconds_since_last_ok,
+    }, null, 2);
+  } else if (s.error) {
+    resultEl.textContent = s.error;
+  } else if (s.result) {
+    resultEl.textContent = JSON.stringify(s.result, null, 2);
+  }
+  applyBtn.disabled = s.state === 'running';
+  if (s.state === 'running' && !applyPoll) {
+    applyPoll = setInterval(pollApply, 2000);
+  }
+  if (s.state !== 'running' && applyPoll) {
+    clearInterval(applyPoll);
+    applyPoll = null;
+  }
+  // Reload the empty staged table once when a job finishes; keep state=done
+  // so the JSON result stays visible. sessionStorage prevents an infinite reload loop.
+  if (s.state === 'done' && s.finished_at) {
+    const key = 'mailJanitorApplyAck:' + s.finished_at;
+    if (!sessionStorage.getItem(key)) {
+      sessionStorage.setItem(key, '1');
+      statusLine.textContent += ' · Reloading table…';
+      setTimeout(() => location.reload(), 400);
+    }
+  }
+}
+async function pollApply() {
+  const res = await fetch('/api/apply/status');
+  if (!res.ok) return;
+  renderApplyStatus(await res.json());
+}
+
+async function bulk(included) {
+  const items = [...document.querySelectorAll('tr[data-folder]')]
+    .filter(tr => tr.querySelector('.row-check')?.checked)
+    .map(tr => ({ folder: tr.dataset.folder, uid: Number(tr.dataset.uid) }));
+  if (!items.length) return alert('Check rows first');
+  await fetch('/api/staged/bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ items, included }),
+  });
+  location.reload();
+}
+async function bulkAll(included) {
+  const noun = included ? 'include' : 'exclude';
+  if (!confirm(noun + ' ALL staged messages matching current filters?')) return;
+  await fetch('/api/staged/bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ all: true, included, ...filterState }),
+  });
+  location.reload();
+}
+document.getElementById('select-all')?.addEventListener('click', () => {
+  document.querySelectorAll('.row-check').forEach(c => c.checked = true);
+});
+document.getElementById('select-none')?.addEventListener('click', () => {
+  document.querySelectorAll('.row-check').forEach(c => c.checked = false);
+});
+document.getElementById('deselect-selected')?.addEventListener('click', () => bulk(false));
+document.getElementById('include-selected')?.addEventListener('click', () => bulk(true));
+document.getElementById('include-all-staged')?.addEventListener('click', () => bulkAll(true));
+document.getElementById('exclude-all-staged')?.addEventListener('click', () => bulkAll(false));
+document.querySelectorAll('.toggle-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const tr = btn.closest('tr');
+    const fd = new FormData();
+    fd.set('folder', tr.dataset.folder);
+    fd.set('uid', tr.dataset.uid);
+    fd.set('included', btn.dataset.included);
+    await fetch('/api/staged/include', { method: 'POST', body: fd });
+    location.reload();
+  });
+});
+document.querySelectorAll('.keep-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const fd = new FormData();
+    fd.set('from_addr', btn.dataset.from);
+    await fetch('/api/keep-sender', { method: 'POST', body: fd });
+    alert('Keep rule added for ' + btn.dataset.from + '. Re-stage to apply exclusion.');
+  });
+});
+document.getElementById('apply-btn')?.addEventListener('click', async () => {
+  const typed = document.getElementById('confirm-input').value.trim();
+  if (typed !== confirmPhrase) {
+    alert('Type the exact phrase:\n' + confirmPhrase);
+    return;
+  }
+  const count = {{ preflight.count }};
+  if (!confirm('Start moving ALL ' + count + ' included messages to ready2delete?\n\nThis runs in the background and can take several minutes. Leave this tab open.')) {
+    return;
+  }
+  applyBtn.disabled = true;
+  statusLine.textContent = 'Status: starting…';
+  resultEl.textContent = '';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/apply', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    statusLine.textContent = 'Status: error';
+    resultEl.textContent = data.detail || res.statusText;
+    applyBtn.disabled = false;
+    return;
+  }
+  renderApplyStatus(data.status || { state: 'running', message: 'Moving…' });
+  if (!applyPoll) applyPoll = setInterval(pollApply, 2000);
+});
+// Enter in the confirm box should also trigger move (not a page navigation)
+document.getElementById('confirm-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('apply-btn')?.click();
+  }
+});
+pollApply();
+</script>
+{% endblock %}

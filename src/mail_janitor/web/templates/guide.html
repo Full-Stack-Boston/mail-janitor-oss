@@ -1,0 +1,676 @@
+{% extends "base.html" %}
+{% block title %}Mail Janitor — clean your inbox{% endblock %}
+{% block content %}
+{% if is_demo %}
+<div class="demo-hero-atmos" aria-hidden="true">
+  <img src="{{ base_path }}/static/icon-envelope.svg" alt="" />
+  <div>
+    <p class="kicker">Guided cleanup</p>
+    <h2 class="hero-line">We’ll tidy your inbox together</h2>
+  </div>
+</div>
+<p class="lede">
+  One step at a time. Nothing leaves your inbox until you say so —
+  by typing a short confirm phrase.
+</p>
+{% else %}
+<p class="kicker">Guided cleanup</p>
+<h2 class="hero-line">We’ll tidy your inbox together</h2>
+<p class="lede">
+  One step at a time. Nothing leaves your inbox until you say so —
+  by typing a short confirm phrase.
+</p>
+{% endif %}
+
+<div class="guide-progress" aria-label="Progress">
+  <span class="guide-step-pill" data-step="1">{% if is_demo %}<img src="{{ base_path }}/static/icon-envelope.svg" alt="" />{% endif %}1 · Sign in</span>
+  <span class="guide-step-pill" data-step="2">{% if is_demo %}<img src="{{ base_path }}/static/icon-inbox.svg" alt="" />{% endif %}2 · Look</span>
+  <span class="guide-step-pill" data-step="3">{% if is_demo %}<img src="{{ base_path }}/static/icon-shield.svg" alt="" />{% endif %}3 · Protect</span>
+  <span class="guide-step-pill" data-step="4">{% if is_demo %}<img src="{{ base_path }}/static/icon-spark.svg" alt="" />{% endif %}4 · Clean</span>
+  <span class="guide-step-pill" data-step="5">{% if is_demo %}<img src="{{ base_path }}/static/icon-inbox.svg" alt="" />{% endif %}5 · Done</span>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Messages left in Inbox</div>
+    <div class="value ok" id="guide-inbox">{{ inbox_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Your email</div>
+    <div class="value" style="font-size:1.05rem;font-family:var(--sans);font-weight:600;margin-top:0.55rem;word-break:break-all" id="guide-email-display">
+      {{ profile.email if profile.email and profile.email != 'you@example.com' else 'Not signed in' }}
+    </div>
+  </div>
+</div>
+
+<section class="guide-panel" id="step-connect" data-step="1">
+  <h3>Sign in to your email</h3>
+  <p class="step-help" id="connect-help">
+    Pick the company that runs your email. Then enter your address and the
+    special “app password” they give you (not the password you use every day).
+  </p>
+
+  <p style="font-weight:600;margin:0 0 0.45rem">Who is your email from?</p>
+  <div class="provider-grid" id="provider-grid" role="group" aria-label="Email provider">
+    {% for pack in provider_packs %}
+    <button type="button" class="provider-choice {% if pack.id == profile.provider or (profile.provider == 'gmail' and pack.id == 'gmail_imap') %}selected{% endif %}"
+      data-id="{{ pack.id }}">{{ pack.label }}</button>
+    {% endfor %}
+  </div>
+  <input type="hidden" id="guide-provider" value="{{ profile.provider if profile.provider != 'gmail' else 'gmail_imap' }}" />
+
+  <div class="field-stack">
+    <label>
+      Your email address
+      <input id="guide-email" type="email" value="{{ '' if profile.email == 'you@example.com' else profile.email }}"
+        placeholder="grandma@yahoo.com" autocomplete="username" />
+    </label>
+    <label id="guide-password-wrap">
+      <span id="guide-password-label">App password</span>
+      <span class="hint" id="guide-password-hint">This is a special password from your email company — not your normal login.</span>
+      <input id="guide-password" type="password" autocomplete="current-password" />
+    </label>
+    <label id="guide-host-wrap" style="display:none">
+      Mail server address
+      <span class="hint">Ask a helper if you don’t know this. Example: imap.example.com</span>
+      <input id="guide-imap-host" placeholder="imap.example.com" />
+    </label>
+  </div>
+
+  <div class="toolbar">
+    <button type="button" class="primary-lg" id="btn-test-connect">Check my sign-in</button>
+  </div>
+  <p id="connect-status" class="status-line muted"></p>
+</section>
+
+<section class="guide-panel" id="step-scan" data-step="2" hidden>
+  <h3>Look through your mail</h3>
+  <p class="step-help">
+    We’ll read the sender, subject, and date of each message — not the full letter.
+    This can take a few minutes the first time. Leave this page open.
+  </p>
+  <div class="toolbar">
+    <button type="button" class="primary-lg" id="btn-guide-scan" aria-busy="false">
+      Start looking
+    </button>
+  </div>
+  <div id="scan-busy" class="job-busy" hidden aria-live="polite">
+    <div class="job-busy-row">
+      <span class="job-spinner" aria-hidden="true"></span>
+      <strong id="scan-busy-title">Looking through your mail…</strong>
+    </div>
+    <p id="scan-busy-detail" class="job-busy-detail">Connecting…</p>
+    <div class="job-progress" aria-hidden="true">
+      <div class="job-progress-bar" id="scan-progress-bar"></div>
+    </div>
+    <p id="scan-busy-elapsed" class="job-busy-meta muted">Elapsed 0s</p>
+  </div>
+  <p id="scan-status-line" class="status-line muted">Waiting for you…</p>
+</section>
+
+<section class="guide-panel" id="step-protect" data-step="3" hidden>
+  <h3>Protect people you know</h3>
+  <p class="step-help">
+    Leave a check next to family, friends, doctors, and banks.
+    Uncheck anyone you’re not sure about — we can skip them for now.
+  </p>
+  <div class="toolbar">
+    <button type="button" class="primary-lg" id="btn-save-keeps" disabled>Save my protected people</button>
+    <button type="button" class="secondary" id="btn-skip-protect">I don’t recognize anyone — skip</button>
+  </div>
+  <p id="protect-status" class="status-line muted">Loading people…</p>
+  <div class="protect-list" id="protect-body" aria-live="polite"></div>
+</section>
+
+<section class="guide-panel" id="step-clean" data-step="4" hidden>
+  <h3>Clean obvious junk</h3>
+  <p class="step-help">
+    We’ll pick a small batch of likely junk (about 50). You review the number,
+    then type a confirm phrase. Only then do we move mail out of your Inbox.
+  </p>
+  <div class="toolbar" id="clean-find-wrap">
+    <button type="button" class="primary-lg" id="btn-stage-junk">Find junk mail</button>
+  </div>
+  <p id="clean-status" class="status-line muted"></p>
+
+  <div class="confirm-box" id="clean-confirm" hidden>
+    <p style="margin-top:0;font-size:1.1rem">
+      Ready to move <strong id="clean-count">0</strong> messages out of Inbox
+      into a holding folder. They are <em>not</em> permanently deleted.
+    </p>
+    <label for="confirm-input">
+      Type this exactly to continue:
+      <span class="mono" style="display:block;margin-top:0.25rem;color:var(--danger)">{{ confirm_ready }}</span>
+    </label>
+    <input id="confirm-input" autocomplete="off" spellcheck="false" placeholder="{{ confirm_ready }}" />
+    <div class="toolbar" style="margin-top:0.85rem">
+      <button type="button" class="danger primary-lg" id="btn-move-junk" disabled>Move junk out of Inbox</button>
+    </div>
+    <p id="apply-status-line" class="status-line muted"></p>
+  </div>
+</section>
+
+<section class="guide-panel" id="step-done" data-step="5" hidden>
+  <h3>You’re done for now</h3>
+  <p class="step-help" style="font-size:1.2rem;color:var(--ink)">
+    Inbox now has <strong id="done-inbox" style="color:var(--ops)">{{ inbox_count }}</strong> messages.
+    Come back any time new mail piles up — we’ll walk you through again.
+  </p>
+  <div class="toolbar">
+    <button type="button" class="primary-lg" id="btn-restart-guide">Clean more mail</button>
+  </div>
+</section>
+
+<p class="footer-quiet">
+  Need expert controls?
+  <a href="{{ base_path }}/advanced">Open more tools</a>
+  (folder scope, rules, insights).
+</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const packs = {{ provider_packs | tojson }};
+const confirmReady = {{ confirm_ready | tojson }};
+const activeProfile = {{ profile.name | tojson }};
+let connectedOk = {{ 'true' if connected else 'false' }};
+let stagedCount = 0;
+
+function showStep(n) {
+  document.querySelectorAll('.guide-panel').forEach(el => {
+    el.hidden = Number(el.dataset.step) !== n;
+  });
+  document.querySelectorAll('.guide-step-pill').forEach(el => {
+    const s = Number(el.dataset.step);
+    el.classList.toggle('active', s === n);
+    el.classList.toggle('done', s < n);
+  });
+  try { sessionStorage.setItem('mj-guide-step', String(n)); } catch (e) {}
+  if (n === 3) loadProtect();
+  if (n === 5) refreshGuideStats();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function plainError(detail) {
+  const t = String(detail || '').trim();
+  if (!t) return 'Something went wrong. Please try again.';
+  if (/app password|authentication|login failed|invalid credentials/i.test(t)) {
+    return 'Sign-in failed. Double-check your email and app password. Yahoo, Gmail, and Zoho need a special app password — not the one you type on the website every day.';
+  }
+  if (/timed out|timeout|unreachable|connection refused|failed to connect/i.test(t)) {
+    return 'We could not reach your email company. Check your internet, then try again.';
+  }
+  if (/permission denied|errno 13/i.test(t)) {
+    return 'Mail Janitor could not read its saved sign-in. Ask your helper to restart the service, then try again.';
+  }
+  if (/already running|scan is already/i.test(t)) {
+    return 'A look is already in progress. Watch the progress panel — or wait a moment and try again.';
+  }
+  return t;
+}
+
+function syncProviderHelp() {
+  const id = document.getElementById('guide-provider').value;
+  const pack = packs.find(p => p.id === id) || {};
+  document.getElementById('connect-help').textContent =
+    pack.auth_help || 'Enter your email and the special app password from your email company.';
+  document.getElementById('guide-password-label').textContent = pack.password_label || 'App password';
+  document.getElementById('guide-password-hint').textContent =
+    'Ask a helper if you need to create an app password. It is different from your everyday password.';
+  const hostWrap = document.getElementById('guide-host-wrap');
+  hostWrap.style.display = id === 'imap' ? '' : 'none';
+  if (pack.imap_host && id !== 'imap') {
+    document.getElementById('guide-imap-host').value = pack.imap_host;
+  }
+  document.querySelectorAll('.provider-choice').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.id === id);
+  });
+}
+
+document.querySelectorAll('.provider-choice').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('guide-provider').value = btn.dataset.id;
+    syncProviderHelp();
+  });
+});
+syncProviderHelp();
+
+function profileNameFromEmail(email) {
+  const local = String(email || '').split('@')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return local || activeProfile || 'mailbox';
+}
+
+document.getElementById('btn-test-connect')?.addEventListener('click', async () => {
+  const el = document.getElementById('connect-status');
+  const btn = document.getElementById('btn-test-connect');
+  const email = document.getElementById('guide-email').value.trim();
+  const password = document.getElementById('guide-password').value;
+  if (!email || !password) {
+    el.className = 'status-line err';
+    el.textContent = 'Please enter both your email address and app password.';
+    return;
+  }
+  btn.disabled = true;
+  el.className = 'status-line muted';
+  el.textContent = 'Checking your sign-in…';
+  const body = {
+    profile_name: activeProfile && activeProfile !== 'demo' ? activeProfile : profileNameFromEmail(email),
+    provider: document.getElementById('guide-provider').value,
+    email,
+    app_password: password,
+    imap_host: document.getElementById('guide-imap-host').value.trim() || null,
+  };
+  const res = await fetch('/api/guide/connect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  btn.disabled = false;
+  if (!res.ok) {
+    el.className = 'status-line err';
+    el.textContent = plainError(data.detail);
+    connectedOk = false;
+    return;
+  }
+  el.className = 'status-line ok';
+  el.textContent = 'Success! You’re signed in. Moving to the next step…';
+  connectedOk = true;
+  const disp = document.getElementById('guide-email-display');
+  if (disp) disp.textContent = email;
+  setTimeout(() => showStep(2), 700);
+  if (data.switched) setTimeout(() => location.reload(), 900);
+});
+
+async function refreshGuideStats() {
+  try {
+    const res = await fetch('/api/stats');
+    if (!res.ok) return;
+    const d = await res.json();
+    const fmt = n => Number(n).toLocaleString();
+    if (d.inbox_count != null) {
+      document.getElementById('guide-inbox').textContent = fmt(d.inbox_count);
+      document.getElementById('done-inbox').textContent = fmt(d.inbox_count);
+    }
+  } catch (e) {}
+}
+
+let scanPollTimer = null;
+let scanElapsedTimer = null;
+let scanStartedAt = 0;
+let scanFailStreak = 0;
+
+function fmtElapsed(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (window.MJProgress && MJProgress.formatDuration) {
+    return MJProgress.formatDuration(sec);
+  }
+  if (sec < 60) return sec + 's';
+  return Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
+}
+
+function setScanBusy(busy, title) {
+  const btn = document.getElementById('btn-guide-scan');
+  const box = document.getElementById('scan-busy');
+  const line = document.getElementById('scan-status-line');
+  if (!btn || !box) return;
+  btn.disabled = busy;
+  btn.setAttribute('aria-busy', busy ? 'true' : 'false');
+  btn.classList.toggle('is-busy', busy);
+  btn.textContent = busy ? 'Looking…' : 'Start looking';
+  box.hidden = !busy;
+  if (busy) {
+    document.getElementById('scan-busy-title').textContent =
+      title || 'Looking through your mail…';
+    line.className = 'status-line muted';
+    line.textContent = 'In progress — leave this page open.';
+    if (!scanElapsedTimer) {
+      scanStartedAt = Date.now();
+      const tick = () => {
+        document.getElementById('scan-busy-elapsed').textContent =
+          'Elapsed ' + fmtElapsed(Date.now() - scanStartedAt) +
+          ' · still working';
+      };
+      tick();
+      scanElapsedTimer = setInterval(tick, 500);
+    }
+  } else {
+    if (scanElapsedTimer) {
+      clearInterval(scanElapsedTimer);
+      scanElapsedTimer = null;
+    }
+    document.getElementById('scan-progress-bar').style.width = '0%';
+  }
+}
+
+function updateScanProgress(s) {
+  const detail = document.getElementById('scan-busy-detail');
+  const bar = document.getElementById('scan-progress-bar');
+  const msg = s.message ? String(s.message) : '';
+  const eta = s.eta || {};
+  const prog = s.progress || {};
+  const live = s.message_count_live;
+  const parts = [];
+  if (msg) parts.push(msg);
+  else parts.push('Reading senders and subjects…');
+  if (eta.summary) parts.push(eta.summary);
+  if (live != null) parts.push(Number(live).toLocaleString() + ' messages indexed so far');
+  detail.textContent = parts.join(' · ');
+
+  const done = Number(prog.uids_done || eta.done || 0);
+  const total = Number(prog.uids_planned || eta.total || 0);
+  if (total > 0) {
+    const pct = Math.max(4, Math.min(96, Math.round((done / total) * 100)));
+    bar.style.width = pct + '%';
+    bar.classList.remove('indeterminate');
+  } else {
+    bar.style.width = '35%';
+    bar.classList.add('indeterminate');
+  }
+}
+
+function stopScanPoll() {
+  if (scanPollTimer) {
+    clearTimeout(scanPollTimer);
+    scanPollTimer = null;
+  }
+}
+
+function scheduleScanPoll(ms) {
+  stopScanPoll();
+  scanPollTimer = setTimeout(pollScan, ms);
+}
+
+function apiErrorText(data, fallback) {
+  if (!data || typeof data !== 'object') return plainError(fallback);
+  const raw = data.detail ?? data.error ?? data.message ?? fallback;
+  if (Array.isArray(raw)) {
+    return plainError(raw.map(x => x.msg || x).join('; '));
+  }
+  return plainError(raw);
+}
+
+async function pollScan() {
+  const line = document.getElementById('scan-status-line');
+  try {
+    const res = await fetch('/api/scan/status', { cache: 'no-store' });
+    const s = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      scanFailStreak += 1;
+      document.getElementById('scan-busy-detail').textContent =
+        'Still looking… temporarily lost the status link. Retrying…';
+      scheduleScanPoll(Math.min(8000, 1200 * scanFailStreak));
+      return;
+    }
+    scanFailStreak = 0;
+    if (s.state === 'running') {
+      setScanBusy(true);
+      updateScanProgress(s);
+      scheduleScanPoll(1200);
+      return;
+    }
+    stopScanPoll();
+    setScanBusy(false);
+    if (s.state === 'error') {
+      line.className = 'status-line err';
+      line.textContent = apiErrorText(
+        s,
+        s.error || s.message || 'Looking failed. Please try again.',
+      );
+      return;
+    }
+    if (s.state === 'done') {
+      const after = s.message_count_after ?? s.message_count_live;
+      line.className = 'status-line ok';
+      line.textContent =
+        (s.message ? String(s.message) + ' · ' : '') +
+        'Done looking' +
+        (after != null ? ' (' + Number(after).toLocaleString() + ' messages indexed)' : '') +
+        '. Next we’ll protect people you know.';
+      refreshGuideStats();
+      setTimeout(() => showStep(3), 900);
+      return;
+    }
+    // idle / unknown — do not pretend success
+    line.className = 'status-line muted';
+    line.textContent = 'Ready when you are — press Start looking.';
+  } catch (e) {
+    scanFailStreak += 1;
+    document.getElementById('scan-busy-detail').textContent =
+      'Still looking… connection hiccup. Retrying…';
+    scheduleScanPoll(Math.min(8000, 1200 * scanFailStreak));
+  }
+}
+
+async function startScan(resume) {
+  stopScanPoll();
+  scanFailStreak = 0;
+  setScanBusy(true, 'Starting look…');
+  document.getElementById('scan-busy-detail').textContent =
+    'Kickoff sent — waiting for the first progress update…';
+  document.getElementById('scan-status-line').className = 'status-line muted';
+  document.getElementById('scan-status-line').textContent =
+    'In progress — leave this page open.';
+  try {
+    const fd = new FormData();
+    fd.set('resume', resume ? '1' : '0');
+    const res = await fetch('/api/scan', { method: 'POST', body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Proxy/gateway timeouts often mean the start is still queued — attach to status.
+      if (res.status === 504 || res.status === 502 || res.status === 408) {
+        document.getElementById('scan-busy-detail').textContent =
+          'Start is taking a moment — watching for progress…';
+        scheduleScanPoll(800);
+        return;
+      }
+      setScanBusy(false);
+      document.getElementById('scan-status-line').className = 'status-line err';
+      document.getElementById('scan-status-line').textContent = apiErrorText(
+        data,
+        'Could not start looking. Please try again.',
+      );
+      return;
+    }
+    if (data.status) updateScanProgress(data.status);
+    else {
+      document.getElementById('scan-busy-title').textContent =
+        'Looking through your mail…';
+      document.getElementById('scan-busy-detail').textContent =
+        'Connected. Reading folders…';
+    }
+    scheduleScanPoll(600);
+  } catch (e) {
+    // Network/proxy abort: keep busy UI and poll — start may still succeed server-side.
+    document.getElementById('scan-busy-detail').textContent =
+      'Connection hiccup after start — checking whether the look is running…';
+    scheduleScanPoll(1000);
+  }
+}
+document.getElementById('btn-guide-scan')?.addEventListener('click', () => startScan(true));
+
+async function loadProtect() {
+  const status = document.getElementById('protect-status');
+  const body = document.getElementById('protect-body');
+  status.className = 'status-line muted';
+  status.textContent = 'Finding people who might be important…';
+  body.innerHTML = '';
+  const res = await fetch('/api/guide/protect-candidates');
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    status.className = 'status-line err';
+    status.textContent = plainError(data.detail);
+    return;
+  }
+  const rows = data.candidates || [];
+  if (!rows.length) {
+    status.textContent = 'No special people turned up. You can skip ahead.';
+    document.getElementById('btn-save-keeps').disabled = true;
+    body.innerHTML = '<p class="muted">Nothing to protect right now.</p>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <label class="protect-row">
+      <input type="checkbox" class="protect-pick" data-addr="${r.from_addr}" checked />
+      <span>
+        <span class="who">${r.from_addr}</span>
+        <span class="sample">${(r.sample_subject || 'No subject').slice(0, 80)}</span>
+      </span>
+    </label>`).join('');
+  status.textContent = rows.length + ' people shown — leave checks on anyone you trust.';
+  document.getElementById('btn-save-keeps').disabled = false;
+}
+
+document.getElementById('btn-save-keeps')?.addEventListener('click', async () => {
+  const values = [...document.querySelectorAll('.protect-pick:checked')].map(c => c.dataset.addr).filter(Boolean);
+  const status = document.getElementById('protect-status');
+  if (!values.length) {
+    status.className = 'status-line err';
+    status.textContent = 'Check at least one person, or tap Skip.';
+    return;
+  }
+  status.className = 'status-line muted';
+  status.textContent = 'Saving…';
+  const res = await fetch('/api/keepers/keep-bulk', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ kind: 'from_address', values }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    status.className = 'status-line err';
+    status.textContent = plainError(data.detail);
+    return;
+  }
+  status.className = 'status-line ok';
+  status.textContent = 'Protected ' + (data.created?.length || values.length) + ' people. Next: clean junk.';
+  setTimeout(() => showStep(4), 700);
+});
+
+document.getElementById('btn-skip-protect')?.addEventListener('click', () => showStep(4));
+
+document.getElementById('btn-stage-junk')?.addEventListener('click', async () => {
+  const el = document.getElementById('clean-status');
+  const btn = document.getElementById('btn-stage-junk');
+  btn.disabled = true;
+  btn.classList.toggle('is-busy', true);
+  btn.textContent = 'Finding junk…';
+  el.className = 'status-line muted';
+  el.textContent = 'Looking for junk in your indexed mail…';
+  try {
+    const res = await fetch('/api/stage/junk?limit=50&clear=1', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ limit: 50, clear: true, confidence: 'junk' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      el.className = 'status-line err';
+      el.textContent = apiErrorText(data, 'Could not find junk right now. Please try again.');
+      return;
+    }
+    stagedCount = data.staged_included ?? data.staged ?? 0;
+    if (!stagedCount) {
+      el.className = 'status-line ok';
+      el.textContent = 'No obvious junk right now. You’re in good shape.';
+      document.getElementById('clean-confirm').hidden = true;
+      setTimeout(() => showStep(5), 1000);
+      return;
+    }
+    el.className = 'status-line ok';
+    el.textContent = 'Found ' + stagedCount + ' likely junk messages.';
+    document.getElementById('clean-count').textContent = String(stagedCount);
+    document.getElementById('clean-confirm').hidden = false;
+    document.getElementById('confirm-input').value = '';
+    document.getElementById('btn-move-junk').disabled = true;
+    document.getElementById('confirm-input').focus();
+  } catch (e) {
+    el.className = 'status-line err';
+    el.textContent = plainError(e && e.message) || 'Could not reach Mail Janitor. Refresh and try again.';
+  } finally {
+    btn.disabled = false;
+    btn.classList.toggle('is-busy', false);
+    btn.textContent = 'Find junk mail';
+  }
+});
+
+const confirmInput = document.getElementById('confirm-input');
+confirmInput?.addEventListener('input', () => {
+  const ok = confirmInput.value.trim() === confirmReady;
+  document.getElementById('btn-move-junk').disabled = !ok;
+});
+
+async function pollApply() {
+  const line = document.getElementById('apply-status-line');
+  const res = await fetch('/api/apply/status');
+  if (!res.ok) return;
+  const s = await res.json();
+  if (s.state === 'running') {
+    line.className = 'status-line muted';
+    let t = 'Moving mail…';
+    if (s.message) t = s.message;
+    if (s.eta && s.eta.eta_human && s.eta.eta_human !== '—') t += ' · about ' + s.eta.eta_human + ' left';
+    line.textContent = t;
+    setTimeout(pollApply, 2000);
+    return;
+  }
+  document.getElementById('btn-move-junk').disabled = false;
+  document.getElementById('btn-stage-junk').disabled = false;
+  if (s.state === 'error') {
+    line.className = 'status-line err';
+    line.textContent = plainError(s.error || s.message);
+    return;
+  }
+  line.className = 'status-line ok';
+  line.textContent = 'Moved. Your Inbox is lighter.';
+  refreshGuideStats();
+  setTimeout(() => showStep(5), 900);
+}
+
+document.getElementById('btn-move-junk')?.addEventListener('click', async () => {
+  const typed = document.getElementById('confirm-input').value.trim();
+  if (typed !== confirmReady) {
+    alert('Please type the phrase exactly as shown.');
+    return;
+  }
+  const btn = document.getElementById('btn-move-junk');
+  btn.disabled = true;
+  document.getElementById('apply-status-line').className = 'status-line muted';
+  document.getElementById('apply-status-line').textContent = 'Starting move…';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/apply', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    document.getElementById('apply-status-line').className = 'status-line err';
+    document.getElementById('apply-status-line').textContent = plainError(data.detail);
+    btn.disabled = false;
+    return;
+  }
+  pollApply();
+});
+
+document.getElementById('btn-restart-guide')?.addEventListener('click', () => {
+  document.getElementById('clean-confirm').hidden = true;
+  showStep(connectedOk ? 2 : 1);
+});
+
+const start = Number(sessionStorage.getItem('mj-guide-step') || (connectedOk ? '2' : '1'));
+showStep(start >= 1 && start <= 5 ? start : 1);
+
+// If a look is already running (refresh / reopen), re-attach progress UI.
+(async function resumeScanIfRunning() {
+  try {
+    const res = await fetch('/api/scan/status', { cache: 'no-store' });
+    if (!res.ok) return;
+    const s = await res.json();
+    if (s.state === 'running') {
+      showStep(2);
+      setScanBusy(true);
+      updateScanProgress(s);
+      scheduleScanPoll(800);
+    }
+  } catch (e) {}
+})();
+</script>
+{% endblock %}

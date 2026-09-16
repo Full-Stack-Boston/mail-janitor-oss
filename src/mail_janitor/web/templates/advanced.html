@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Advanced — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Advanced tools</h2>
+<p class="muted" style="font-size:1.05rem;max-width:40rem">
+  Power-user pages from the original workflow. Most people should stay on
+  <a href="{{ base_path }}/guide">Get started</a>.
+</p>
+<section class="cards">
+  <div class="card"><div class="label">Indexed</div><div class="value">{{ message_count }}</div></div>
+  <div class="card"><div class="label">Staged</div><div class="value">{{ staged_count }}</div></div>
+  <div class="card"><div class="label">Inbox</div><div class="value">{{ inbox_count }}</div></div>
+</section>
+<div class="toolbar" style="flex-wrap:wrap;gap:0.75rem;margin:1rem 0">
+  <a class="btn" href="{{ base_path }}/home">Scan home (legacy)</a>
+  <a class="btn secondary" href="{{ base_path }}/insights">Insights</a>
+  <a class="btn secondary" href="{{ base_path }}/keepers">Keep explorer</a>
+  <a class="btn secondary" href="{{ base_path }}/suggestions">Suggested rules</a>
+  <a class="btn secondary" href="{{ base_path }}/rules">Rules</a>
+  <a class="btn secondary" href="{{ base_path }}/review">Review emails</a>
+  <a class="btn secondary" href="{{ base_path }}/export.csv">Export CSV</a>
+</div>
+<section class="preflight">
+  <h3 style="margin-top:0">Maintenance</h3>
+  <div class="toolbar">
+    <button type="button" id="btn-archive-dormant" class="secondary">Archive zero-match stage rules</button>
+    <button type="button" id="btn-repair-blank" class="secondary">Repair blank From/Subject</button>
+    <span id="maint-status" class="mono muted"></span>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('btn-archive-dormant')?.addEventListener('click', async () => {
+  const el = document.getElementById('maint-status');
+  el.textContent = 'Archiving…';
+  const res = await fetch('/api/rules/archive-dormant', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  el.textContent = res.ok ? `Archived ${data.archived || 0} · still active ${data.still_active || 0}` : (data.detail || 'Failed');
+});
+document.getElementById('btn-repair-blank')?.addEventListener('click', async () => {
+  const el = document.getElementById('maint-status');
+  el.textContent = 'Repairing…';
+  const res = await fetch('/api/refresh-blank-headers', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  el.textContent = res.ok ? `Repaired ${data.repaired || 0}` : (data.detail || 'Failed');
+});
+</script>
+{% endblock %}

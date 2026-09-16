@@ -1,0 +1,412 @@
+{% extends "base.html" %}
+{% block title %}Suggested rules — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Review suggested rules</h2>
+{% if has_focus_batch %}
+<p class="muted">
+  These are the <strong>new</strong> cleanup rules from your latest Insights picks.
+  Tweak age cutoffs if needed, then stage to review the actual messages.
+  Match counts use your <strong>cleanup folder scope</strong> below (same as staging).
+  Older rules stay on file for future mail.
+</p>
+{% else %}
+<p class="muted">
+  Cleanup rules with current matches in <strong id="stage-scope-summary">{{ stage_scope_label }}</strong>.
+  Tweak age cutoffs, uncheck anything you don’t want, then stage approved rules to review.
+</p>
+{% endif %}
+
+<details class="preflight" id="stage-folders-panel" open style="margin:1rem 0"
+  data-all-folders="{{ 'true' if all_folders_mode else 'false' }}"
+  data-effective="{{ (effective_stage_folders or []) | join('||') }}">
+  <summary style="cursor:pointer;font-weight:600">Cleanup folder scope</summary>
+  <p class="muted" style="margin:0.5rem 0 0.75rem">
+    Pick which folders cleanup rules search (Inbox, Sent, Bulk, Personal, etc.).
+    Saving reloads match counts below.
+  </p>
+  <div class="toolbar" style="margin-bottom:0.5rem">
+    <button type="button" class="secondary" id="folder-pick-all">Select all</button>
+    <button type="button" class="secondary" id="folder-pick-none">Select none</button>
+    <button type="button" class="secondary" id="folder-pick-common">Inbox + Sent + Bulk</button>
+  </div>
+  <div id="folder-checkboxes" class="folder-grid">
+    <span class="muted" id="folder-load-status">Loading folders…</span>
+  </div>
+  <label style="display:flex;gap:0.5rem;align-items:center;margin:0.75rem 0 0.5rem">
+    <input type="checkbox" id="stage-all-folders" {% if all_folders_mode %}checked{% endif %} />
+    <span>All indexed folders <span class="muted">(ignore checkboxes above)</span></span>
+  </label>
+  <div class="toolbar" style="margin-top:0.5rem">
+    <button type="button" id="save-stage-folders">Save folder scope</button>
+    <span id="folder-save-status" class="mono muted"></span>
+  </div>
+</details>
+<script type="application/json" id="indexed-folders-bootstrap">{% if mj_list_folders is defined %}{{ mj_list_folders(profile) | tojson }}{% else %}{{ indexed_folders_json | default('[]') | safe }}{% endif %}</script>
+
+<div class="action-bar">
+  <button type="button" id="select-all-rules">Select all shown</button>
+  <button type="button" class="secondary" id="select-none-rules">Select none</button>
+  <button type="button" id="btn-stage-approved">Stage approved → email review</button>
+  <span id="stage-result" class="mono muted"></span>
+</div>
+
+{% macro rule_card(p, compact=false, checked=true) -%}
+<section class="preflight rule-card{% if compact %} rule-card-compact{% endif %}" data-rule-id="{{ p.rule_id }}">
+  <div class="toolbar" style="justify-content:space-between;width:100%">
+    <label style="display:flex;gap:0.5rem;align-items:center;{% if not compact %}font-weight:600{% endif %}">
+      <input type="checkbox" class="rule-approve" {% if checked %}checked{% endif %} />
+      {{ p.label }}
+      <span class="mono muted">({{ p.rule_id }})</span>
+    </label>
+    <button type="button" class="secondary drop-rule" data-rule-id="{{ p.rule_id }}">Remove</button>
+  </div>
+
+  <p style="{% if compact %}margin:0.35rem 0;font-size:0.95rem{% endif %}">
+    <strong>{{ p.match_count }}</strong> in {{ p.stage_scope or profile.inbox_folder }} · {{ p.total_bytes_human }}
+    {% if not compact %}
+    · attachments known: <strong>{{ p.with_attachment }}</strong>
+    · unknown: {{ p.attachment_unknown }}
+    · ≥100KB: {{ p.large_100k }}
+    {% endif %}
+  </p>
+
+  {% if not compact %}
+  <p class="muted" style="font-size:0.9rem">
+    Attachment flags fill in on Scan/Refresh (structure metadata, not body download).
+  </p>
+  <div class="toolbar">
+    <label>Only older than
+      <input type="number" class="older-days" min="0" step="1"
+        value="{{ p.criteria.older_than_days if p.criteria.older_than_days is not none else '' }}"
+        placeholder="days (blank = all ages)" style="width:8rem" />
+      days
+    </label>
+    <button type="button" class="secondary save-older">Apply age cutoff</button>
+    <span class="save-status mono muted"></span>
+  </div>
+  <details>
+    <summary>Sample messages (metadata)</summary>
+    <table>
+      <thead><tr><th>Date</th><th>From</th><th>Subject</th><th>Folder</th><th>Size</th></tr></thead>
+      <tbody>
+      {% for s in p.samples %}
+        <tr>
+          <td class="mono">{{ s.date_human }}</td>
+          <td class="mono">{{ s.from_addr }}</td>
+          <td class="subject">{{ s.subject }}</td>
+          <td class="mono">{{ s.folder }}</td>
+          <td>{{ s.size_human }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">No matches with current criteria</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% else %}
+  <div class="toolbar" style="gap:0.75rem">
+    <label class="muted" style="font-size:0.9rem">Older than
+      <input type="number" class="older-days" min="0" step="1"
+        value="{{ p.criteria.older_than_days if p.criteria.older_than_days is not none else '' }}"
+        placeholder="any" style="width:5rem" /> d
+    </label>
+    <button type="button" class="secondary save-older">Save</button>
+    <span class="save-status mono muted"></span>
+  </div>
+  {% endif %}
+</section>
+{%- endmacro %}
+
+{% if focus_previews %}
+  {% if has_focus_batch %}
+  <h3 style="margin-top:1rem">This batch ({{ focus_previews|length }})</h3>
+  {% endif %}
+  {% for p in focus_previews %}
+    {{ rule_card(p, compact=false, checked=true) }}
+  {% endfor %}
+{% elif not existing_previews %}
+<p class="muted">No suggested rules with current matches. Go to <a href="{{ base_path }}/insights">Insights</a> and create cleanup rules.</p>
+{% endif %}
+
+{% if existing_previews %}
+<details class="existing-rules" style="margin-top:1.5rem;opacity:0.85">
+  <summary class="muted" style="cursor:pointer">
+    {{ existing_previews|length }} earlier rule{{ 's' if existing_previews|length != 1 else '' }}
+    still matching mail
+    ({{ existing_match_total }} messages) — optional, not this batch’s focus
+  </summary>
+  <p class="muted" style="font-size:0.9rem;margin:0.5rem 0">
+    These stay saved for future scans. Check any you also want to stage now.
+  </p>
+  {% for p in existing_previews %}
+    {{ rule_card(p, compact=true, checked=false) }}
+  {% endfor %}
+</details>
+{% elif has_focus_batch and existing_rule_count %}
+<p class="muted" style="font-size:0.85rem;margin-top:1rem">
+  {{ existing_rule_count }} earlier stage rule{{ 's' if existing_rule_count != 1 else '' }}
+  remain on file (not re-scanned for this page — open Suggested rules without a batch
+  focus if you want live match counts for everything).
+</p>
+{% endif %}
+
+{% if dormant_count and dormant_count > 0 %}
+<p class="muted" style="font-size:0.85rem;margin-top:1rem">
+  {{ dormant_count }} other rule{{ 's' if dormant_count != 1 else '' }} on file with
+  <strong>0</strong> current matches — kept for future mail, omitted here.
+</p>
+{% endif %}
+
+<style>
+.folder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.45rem 1rem;
+  margin: 0.5rem 0;
+}
+.folder-grid label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.95rem;
+}
+.rule-card-compact {
+  padding: 0.65rem 0.85rem;
+  margin: 0.4rem 0;
+  background: transparent;
+  border-style: dashed;
+  opacity: 0.92;
+}
+.rule-card-compact .toolbar { margin: 0; }
+</style>
+{% endblock %}
+{% block scripts %}
+<script>
+const stageFolderPanel = document.getElementById('stage-folders-panel');
+const stageAllFolders = document.getElementById('stage-all-folders');
+const folderGrid = document.getElementById('folder-checkboxes');
+const folderLoadStatus = document.getElementById('folder-load-status');
+const folderSaveStatus = document.getElementById('folder-save-status');
+const folderPicks = () => [...document.querySelectorAll('.stage-folder-pick')];
+
+function normalizeFolders(raw) {
+  return (raw || []).map(r => ({
+    folder: r.folder,
+    count: r.count ?? r.cnt ?? 0,
+  })).filter(r => r.folder);
+}
+
+function parseBootstrapFolders() {
+  const el = document.getElementById('indexed-folders-bootstrap');
+  if (!el) return [];
+  try { return normalizeFolders(JSON.parse(el.textContent || '[]')); }
+  catch { return []; }
+}
+
+function effectiveFromPanel() {
+  const raw = stageFolderPanel?.dataset.effective || '';
+  return raw ? raw.split('||').filter(Boolean) : [];
+}
+
+function renderFolderCheckboxes(folders) {
+  if (!folderGrid) return;
+  const allMode = stageAllFolders?.checked;
+  const effective = effectiveFromPanel();
+  folderGrid.innerHTML = '';
+  if (!folders.length) {
+    folderGrid.innerHTML = '<span class="muted">No folders in index — run Scan on Home first.</span>';
+    return;
+  }
+  for (const row of folders) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'stage-folder-pick';
+    cb.value = row.folder;
+    const checked = allMode || (effective.length ? effective.includes(row.folder) : row.folder === 'Inbox');
+    cb.checked = checked;
+    cb.disabled = !!allMode;
+    const name = document.createElement('span');
+    name.className = 'mono';
+    name.textContent = row.folder;
+    const count = document.createElement('span');
+    count.className = 'muted';
+    count.textContent = `(${row.count})`;
+    label.append(cb, name, count);
+    folderGrid.append(label);
+  }
+  if (folderLoadStatus) folderLoadStatus.remove();
+}
+
+async function loadIndexedFolders() {
+  let folders = parseBootstrapFolders();
+  if (!folders.length) {
+    for (const url of ['/api/folders', '/api/stats/detail']) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const data = await res.json();
+        folders = normalizeFolders(data.folders || data.indexed_folders);
+        if (folders.length) break;
+      } catch { /* try next */ }
+    }
+  }
+  if (!folders.length) {
+    try {
+      const res = await fetch('/api/discover?top_n=1');
+      if (res.ok) {
+        const data = await res.json();
+        folders = normalizeFolders(data.folders);
+      }
+    } catch { /* ignore */ }
+  }
+  renderFolderCheckboxes(folders);
+  return folders;
+}
+
+function setAllFolderPicks(checked) {
+  if (stageAllFolders?.checked) return;
+  folderPicks().forEach(cb => { cb.checked = checked; });
+}
+
+function pickCommonFolders() {
+  if (stageAllFolders?.checked) return;
+  const want = new Set(['Inbox', 'Sent', 'Bulk', 'Personal']);
+  folderPicks().forEach(cb => { cb.checked = want.has(cb.value); });
+}
+
+stageAllFolders?.addEventListener('change', () => {
+  const all = stageAllFolders.checked;
+  folderPicks().forEach(cb => {
+    cb.disabled = all;
+    if (all) cb.checked = true;
+  });
+});
+
+document.getElementById('folder-pick-all')?.addEventListener('click', () => setAllFolderPicks(true));
+document.getElementById('folder-pick-none')?.addEventListener('click', () => setAllFolderPicks(false));
+document.getElementById('folder-pick-common')?.addEventListener('click', pickCommonFolders);
+
+document.getElementById('save-stage-folders')?.addEventListener('click', async () => {
+  folderSaveStatus.textContent = 'Saving…';
+  const allFolders = stageAllFolders?.checked;
+  const folders = folderPicks().filter(cb => cb.checked).map(cb => cb.value);
+  if (!allFolders && !folders.length) {
+    folderSaveStatus.textContent = 'Select at least one folder';
+    return;
+  }
+  const res = await fetch('/api/config/stage-folders', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(allFolders ? { all_folders: true } : { folders }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data.detail || (res.status === 404 ? 'Restart review UI to enable saving' : 'Save failed');
+    folderSaveStatus.textContent = msg;
+    return;
+  }
+  folderSaveStatus.textContent = 'Saved — reloading…';
+  location.reload();
+});
+
+loadIndexedFolders();
+
+document.getElementById('select-all-rules')?.addEventListener('click', () => {
+  // Only the visible focus cards + expanded existing if open — simplest: all on page
+  document.querySelectorAll('.rule-approve').forEach(c => c.checked = true);
+});
+document.getElementById('select-none-rules')?.addEventListener('click', () => {
+  document.querySelectorAll('.rule-approve').forEach(c => c.checked = false);
+});
+
+document.querySelectorAll('.save-older').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const card = btn.closest('.rule-card');
+    const ruleId = card.dataset.ruleId;
+    const raw = card.querySelector('.older-days').value;
+    const status = card.querySelector('.save-status');
+    status.textContent = 'Saving…';
+    const body = {
+      rule_id: ruleId,
+      older_than_days: raw === '' ? null : Number(raw),
+    };
+    const res = await fetch('/api/rules/update', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      status.textContent = 'Failed';
+      return;
+    }
+    status.textContent = 'Saved — reloading…';
+    location.reload();
+  });
+});
+
+document.querySelectorAll('.drop-rule').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Remove this suggested rule?')) return;
+    const ruleId = btn.dataset.ruleId;
+    await fetch('/api/rules/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ rule_id: ruleId }),
+    });
+    location.reload();
+  });
+});
+
+document.getElementById('btn-stage-approved')?.addEventListener('click', async () => {
+  const ids = [...document.querySelectorAll('.rule-card')]
+    .filter(card => card.querySelector('.rule-approve')?.checked)
+    .map(card => card.dataset.ruleId);
+  const el = document.getElementById('stage-result');
+  const btn = document.getElementById('btn-stage-approved');
+  if (!ids.length) {
+    el.textContent = 'Select at least one rule';
+    return;
+  }
+  btn.disabled = true;
+  el.textContent = `Starting stage (${ids.length} rules)…`;
+  const res = await fetch('/api/stage?background=1', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ clear: true, rule_ids: ids }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail;
+    el.textContent = typeof detail === 'string' ? detail : (detail ? JSON.stringify(detail) : 'Failed');
+    btn.disabled = false;
+    return;
+  }
+  try {
+    const final = await MJProgress.pollUntil('/api/stage/status', {
+      intervalMs: 800,
+      onTick: (s) => {
+        el.textContent = s.message || ('Status: ' + s.state);
+      },
+    });
+    if (final.state === 'error') {
+      el.textContent = final.error || 'Staging failed';
+      btn.disabled = false;
+      return;
+    }
+    const included = final.result?.staged_included;
+    if (!(included > 0)) {
+      el.textContent = 'No matching messages left to stage (already moved or 0 matches).';
+      btn.disabled = false;
+      return;
+    }
+    el.textContent = `Staged ${included} · opening review…`;
+    setTimeout(() => { location.href = (window.MJ_BASE || '') + '/review'; }, 400);
+  } catch (e) {
+    el.textContent = String(e);
+    btn.disabled = false;
+  }
+});
+</script>
+{% endblock %}

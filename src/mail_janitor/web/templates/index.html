@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Mail Janitor — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<section class="cards">
+  <div class="card">
+    <div class="label">Indexed messages</div>
+    <div class="value" id="stat-messages">{{ message_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Staged (included)</div>
+    <div class="value">{{ staged_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Inbox (triage)</div>
+    <div class="value" style="font-size:1rem">{{ profile.inbox_folder }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Kept folder</div>
+    <div class="value" style="font-size:1rem">{{ profile.kept_folder }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Delete staging</div>
+    <div class="value" style="font-size:1rem">{{ profile.ready_folder }}</div>
+  </div>
+</section>
+
+<section class="preflight" id="scan-panel">
+  <h2>Mailbox scan</h2>
+  <p class="muted">
+    Downloads <strong>headers only</strong> (from, subject, date, size) into a local index.
+    Bodies are never bulk-downloaded. First scan of a large mailbox can take a while; Refresh only picks up new mail.
+  </p>
+  <div class="toolbar">
+    <button type="button" id="btn-scan-refresh">Scan / Refresh mailbox</button>
+    <button type="button" class="secondary" id="btn-scan-full" title="Re-read folders from the beginning">Full rescan</button>
+  </div>
+  <p id="scan-status-line" class="mono muted">Status: {{ scan_status.state }}</p>
+  <pre id="scan-detail" class="mono muted" style="white-space:pre-wrap;max-height:12rem;overflow:auto;"></pre>
+</section>
+
+<div class="warn">
+  <strong>Safety:</strong> Nothing leaves its folder until you type a confirm phrase.
+  Default apply target is <span class="mono">{{ profile.ready_folder }}</span> (not Trash).
+  Yahoo Trash auto-empties after <strong>7 days</strong> and cannot be changed — only use
+  “to trash” when you accept that clock.
+</div>
+
+<p>Workflow: <strong>Scan</strong> → define keep + cleanup rules → <strong>Keep explorer</strong> (move keeps out of Inbox) → <strong>Review</strong> (stage deletes) → empty Inbox = done triaging.</p>
+
+<div class="toolbar">
+  <a class="btn" href="{{ base_path }}/insights">Open insights</a>
+  <a class="btn secondary" href="{{ base_path }}/keepers">Keep explorer</a>
+  <a class="btn secondary" href="{{ base_path }}/suggestions">Suggested rules</a>
+  <a class="btn secondary" href="{{ base_path }}/review">Review emails</a>
+</div>
+
+<section class="preflight">
+  <h2>Three folders</h2>
+  <ul>
+    <li><span class="mono">{{ profile.inbox_folder }}</span> — process here; goal is zero messages</li>
+    <li><span class="mono">{{ profile.kept_folder }}</span> — batch apply after keep rules are set</li>
+    <li><span class="mono">{{ profile.ready_folder }}</span> — staged deletes before Trash</li>
+  </ul>
+  <h2>Confirm phrases</h2>
+  <ul>
+    <li><span class="mono">{{ confirm_kept }}</span> — move Inbox keep matches → {{ profile.kept_folder }}</li>
+    <li><span class="mono">{{ confirm_undo_kept }}</span> — restore from {{ profile.kept_folder }} → Inbox</li>
+    <li><span class="mono">{{ confirm_ready }}</span> — move included staged → {{ profile.ready_folder }}</li>
+    <li><span class="mono">{{ confirm_undo }}</span> — restore from {{ profile.ready_folder }}</li>
+    <li><span class="mono">{{ confirm_trash }}</span> — {{ profile.ready_folder }} → Trash (7-day purge)</li>
+  </ul>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const statusLine = document.getElementById('scan-status-line');
+const detail = document.getElementById('scan-detail');
+const msgStat = document.getElementById('stat-messages');
+const btnRefresh = document.getElementById('btn-scan-refresh');
+const btnFull = document.getElementById('btn-scan-full');
+let pollTimer = null;
+
+function setBusy(busy) {
+  btnRefresh.disabled = busy;
+  btnFull.disabled = busy;
+}
+
+function renderStatus(s) {
+  const live = s.message_count_live ?? s.message_count_after ?? s.message_count_before;
+  if (live != null && msgStat) msgStat.textContent = live;
+  let line = 'Status: ' + s.state;
+  if (s.message) line += ' — ' + s.message;
+  else {
+    if (s.started_at) line += ' · started ' + s.started_at;
+    if (s.finished_at) line += ' · finished ' + s.finished_at;
+  }
+  if (s.eta && s.eta.eta_human && s.eta.eta_human !== '—') {
+    line += ' · ETA ' + s.eta.eta_human;
+  }
+  if (s.message_count_before != null && s.state !== 'running') {
+    line += ' · before ' + s.message_count_before;
+  }
+  if (s.message_count_after != null) line += ' · after ' + s.message_count_after;
+  statusLine.textContent = line;
+  if (s.error) {
+    detail.textContent = s.error;
+  } else if (s.result) {
+    detail.textContent = JSON.stringify(s.result, null, 2);
+  } else if (s.state === 'running') {
+    const eta = s.eta || {};
+    detail.textContent = [
+      s.message || 'Scanning…',
+      eta.summary ? ('Progress: ' + eta.summary) : null,
+      'Leave this page open; ETA updates as folders complete.',
+    ].filter(Boolean).join('\n');
+  } else {
+    detail.textContent = '';
+  }
+  setBusy(s.state === 'running');
+  if (s.state === 'running' && !pollTimer) {
+    pollTimer = setInterval(pollStatus, 2000);
+  }
+  if (s.state !== 'running' && pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+async function pollStatus() {
+  const res = await fetch('/api/scan/status');
+  if (!res.ok) return;
+  renderStatus(await res.json());
+}
+
+async function startScan(resume) {
+  setBusy(true);
+  statusLine.textContent = 'Status: starting…';
+  const fd = new FormData();
+  fd.set('resume', resume ? '1' : '0');
+  const res = await fetch('/api/scan', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    statusLine.textContent = 'Status: error';
+    detail.textContent = data.detail || res.statusText;
+    setBusy(false);
+    return;
+  }
+  renderStatus(data.status || { state: 'running' });
+  if (!pollTimer) pollTimer = setInterval(pollStatus, 2000);
+}
+
+btnRefresh.addEventListener('click', () => startScan(true));
+btnFull.addEventListener('click', () => {
+  if (confirm('Full rescan re-reads folders from the start. Continue?')) startScan(false);
+});
+pollStatus();
+</script>
+{% endblock %}

@@ -1,0 +1,553 @@
+{% extends "base.html" %}
+{% block title %}Insights — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+{% macro flag_badges(flags) -%}
+  {% for f in flags or [] %}
+    <span class="mono muted" style="font-size:0.75rem;border:1px solid #8884;padding:0.05rem 0.3rem;margin-right:0.25rem">{{ f }}</span>
+  {% endfor %}
+{%- endmacro %}
+{% macro section_select_bar(threshold_default=20) -%}
+  <div class="section-select" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;margin:0.35rem 0 0.6rem">
+    <button type="button" class="secondary section-sel-all">Select all</button>
+    <button type="button" class="secondary section-sel-none">Select none</button>
+    <label class="muted" style="display:flex;gap:0.35rem;align-items:center">
+      ≥
+      <input type="number" class="section-threshold" value="{{ threshold_default }}" min="1" style="width:4.5rem" />
+      msgs
+    </label>
+    <button type="button" class="secondary section-sel-threshold">Select ≥ threshold</button>
+    <button type="button" class="secondary section-sel-heuristic">Select heuristic-likely</button>
+  </div>
+{%- endmacro %}
+<h2>Mailbox insights</h2>
+<p class="muted">
+  Nothing moves from this page. Selections become cleanup rules you still review
+  (samples → staged emails → confirm phrase). 
+  <strong>Keep / preserve people you know first</strong> — high volume alone is not proof of spam.
+</p>
+
+<section class="cards">
+  <div class="card">
+    <div class="label">Inbox remaining</div>
+    <div class="value" id="insight-inbox-count">{{ data.inbox_messages }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Indexed (all folders)</div>
+    <div class="value">{{ data.total_messages }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Cleanup-eligible</div>
+    <div class="value">{{ data.cleanup_eligible_messages }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Keep rules</div>
+    <div class="value">{{ data.keep_rule_count }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Eligible size</div>
+    <div class="value" style="font-size:1.2rem">{{ data.cleanup_eligible_bytes_human }}</div>
+  </div>
+</section>
+
+<div class="action-bar" id="insight-actions">
+  <span id="checked-count" class="muted">0 selected</span>
+  <button type="button" class="secondary" id="sel-none-all">Clear all sections</button>
+  <button type="button" class="secondary" id="btn-heuristic-check">Pre-check likely bulk</button>
+  <button type="button" id="btn-create-rules" disabled>Create cleanup rules</button>
+  <button type="button" class="secondary" id="btn-keep-rules" disabled>Keep / preserve selected</button>
+  <span id="action-result" class="mono muted"></span>
+</div>
+
+<section class="preflight" style="margin:1rem 0" id="triage-section">
+  <h3 style="margin-top:0">Junk vs keep triage</h3>
+  <p class="muted" style="font-size:0.95rem">
+    Metadata-only scoring (List-Unsubscribe, marketing hosts, promo subjects, conversation
+    <span class="mono">Re:</span> lines, random Froms). No body download, no LLM.
+    Preserve people who look personal <em>before</em> staging high-confidence junk.
+  </p>
+  {% set t = data.triage or {} %}
+  {% set counts = t.counts or {} %}
+  <div class="cards" style="margin:0.75rem 0">
+    <div class="card">
+      <div class="label">Likely keep</div>
+      <div class="value">{{ counts.keep or 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Uncertain</div>
+      <div class="value">{{ counts.uncertain or 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">High-confidence junk</div>
+      <div class="value">{{ counts.junk or 0 }}</div>
+    </div>
+    <div class="card">
+      <div class="label">Junk size</div>
+      <div class="value" style="font-size:1.1rem">{{ (t.bytes_human or {}).junk or '0 B' }}</div>
+    </div>
+  </div>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem;align-items:center;margin-bottom:0.75rem">
+    <label>Stage junk limit
+      <input type="number" id="junk-stage-limit" value="500" min="1" max="2000" style="width:5.5rem" />
+    </label>
+    <button type="button" id="btn-stage-junk">Stage high-confidence junk → Review</button>
+    <span id="junk-stage-result" class="mono muted"></span>
+  </div>
+  <h4 style="margin:0.5rem 0">Likely keep / uncertain senders
+    <span class="muted" style="font-weight:400;font-size:0.9rem">
+      ({{ (t.likely_keep or [])|length }} shown · {{ t.likely_keep_total or 0 }} total)
+    </span>
+  </h4>
+  <p class="muted" style="font-size:0.9rem">
+    Use <strong>Select all</strong> for everyone shown, then top bar
+    <strong>Create cleanup rules</strong> (to remove) or <strong>Keep / preserve</strong> (to protect).
+  </p>
+  <div class="insight-section" data-section="triage">
+  {{ section_select_bar(1) }}
+  <table>
+    <thead><tr><th></th><th>Lean</th><th>From</th><th>Hints</th><th>Sample subject</th><th>Count</th></tr></thead>
+    <tbody>
+    {% for s in t.likely_keep or [] %}
+      <tr>
+        <td>
+          <input type="checkbox" class="pick"
+            data-kind="from_address"
+            data-value="{{ s.from_addr }}"
+            data-cnt="{{ s.cnt }}"
+            data-heuristic="0" />
+        </td>
+        <td class="mono">{{ s.confidence }}</td>
+        <td class="mono">{{ s.from_addr }}</td>
+        <td>{{ flag_badges(s.flags) }}</td>
+        <td class="subject">{{ s.sample_subject }}</td>
+        <td>{{ s.cnt }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">No keep-leaning leftovers in cleanup-eligible mail.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">Propose next batch</h3>
+  <p class="muted" style="font-size:0.95rem">
+    Not “select all + move.” Builds cleanup rules for the next N candidates above a count
+    threshold (skips Keep + your address + senders/domains that already have stage rules),
+    then opens <em>Suggested rules</em> so you can see who they are before staging/moving.
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.75rem;align-items:center">
+    <label>Min count
+      <input type="number" id="propose-min" value="20" min="1" style="width:5rem" />
+    </label>
+    <label>Limit
+      <input type="number" id="propose-limit" value="50" min="1" max="200" style="width:5rem" />
+    </label>
+    <label><input type="checkbox" id="propose-senders" checked /> Senders</label>
+    <label><input type="checkbox" id="propose-domains" /> Domains</label>
+    <label><input type="checkbox" id="propose-heuristic" /> Heuristic-likely only</label>
+    <button type="button" id="btn-propose">Propose → review rules</button>
+  </div>
+</section>
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">Broader rules</h3>
+  <p class="muted" style="font-size:0.95rem">
+    One rule can cover many senders. Prefer a domain rule when the whole domain is junk;
+    use List-Unsubscribe + age for newsletter-style mail across many addresses.
+  </p>
+  <table>
+    <thead><tr><th></th><th>Rule</th><th>Matches</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for b in data.broader_options %}
+      <tr>
+        <td>
+          <input type="checkbox" class="pick"
+            data-kind="{{ b.kind }}"
+            data-value="{{ b.value }}" />
+        </td>
+        <td>{{ b.label }}</td>
+        <td>{{ b.cnt }}</td>
+        <td>{{ b.bytes_human }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="insight-section" data-section="age">
+  <h3>Age (cleanup cutoffs)</h3>
+  <p class="muted">Check a cutoff to suggest staging everything older than that age (cleanup only — not for keep).</p>
+  {{ section_select_bar(1) }}
+  <table>
+    <thead><tr><th></th><th>Range</th><th>Count</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for b in data.age_buckets %}
+      <tr>
+        <td>
+          {% if b.suggestable %}
+          <input type="checkbox" class="pick"
+            data-kind="older_than_days"
+            data-value="{{ b.older_than_days }}"
+            data-cnt="{{ b.cnt }}" />
+          {% endif %}
+        </td>
+        <td>{{ b.label }}</td>
+        <td>{{ b.cnt }}</td>
+        <td>{{ format_size(b.bytes) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="insight-section" data-section="senders" data-load-more="senders">
+  <h3>Top senders <span class="muted" style="font-weight:400;font-size:0.9rem">({{ data.top_senders|length }} shown · {{ data.sender_total }} eligible)</span></h3>
+  <p class="muted">Your own address is skipped. Kept senders are omitted. Flags are hints only — uncheck anyone you know.</p>
+  {{ section_select_bar(20) }}
+  <table>
+    <thead><tr><th></th><th>From</th><th>Hints</th><th>Count</th><th>Size</th></tr></thead>
+    <tbody id="senders-body">
+    {% for s in data.top_senders %}
+      <tr>
+        <td>
+          {% if s.from_addr and s.from_addr|lower != profile.email|lower %}
+          <input type="checkbox" class="pick"
+            data-kind="from_address"
+            data-value="{{ s.from_addr }}"
+            data-cnt="{{ s.cnt }}"
+            data-heuristic="{{ 1 if s.heuristic_likely else 0 }}" />
+          {% endif %}
+        </td>
+        <td class="mono">{{ s.from_addr }}</td>
+        <td>{{ flag_badges(s.heuristic_flags) }}</td>
+        <td>{{ s.cnt }}</td>
+        <td>{{ format_size(s.bytes) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if data.senders_has_more %}
+  <button type="button" class="secondary" id="load-more-senders" style="margin-top:0.5rem">Load more senders</button>
+  {% endif %}
+</section>
+
+<section class="insight-section" data-section="domains" data-load-more="domains">
+  <h3>Top domains <span class="muted" style="font-weight:400;font-size:0.9rem">({{ data.top_domains|length }} shown · {{ data.domain_total }} eligible)</span></h3>
+  {{ section_select_bar(50) }}
+  <table>
+    <thead><tr><th></th><th>Domain</th><th>Hints</th><th>Count</th><th>Size</th></tr></thead>
+    <tbody id="domains-body">
+    {% for s in data.top_domains %}
+      <tr>
+        <td>
+          {% if s.from_domain and s.from_domain|lower != profile.email.split('@')[-1]|lower %}
+          <input type="checkbox" class="pick"
+            data-kind="from_domain"
+            data-value="{{ s.from_domain }}"
+            data-cnt="{{ s.cnt }}"
+            data-heuristic="{{ 1 if s.heuristic_likely else 0 }}" />
+          {% endif %}
+        </td>
+        <td class="mono">{{ s.from_domain }}</td>
+        <td>{{ flag_badges(s.heuristic_flags) }}</td>
+        <td>{{ s.cnt }}</td>
+        <td>{{ format_size(s.bytes) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if data.domains_has_more %}
+  <button type="button" class="secondary" id="load-more-domains" style="margin-top:0.5rem">Load more domains</button>
+  {% endif %}
+</section>
+
+<section class="insight-section" data-section="folders">
+  <h3>Folders</h3>
+  {{ section_select_bar(1) }}
+  <table>
+    <thead><tr><th></th><th>Folder</th><th>Count</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for f in data.folders %}
+      <tr>
+        <td>
+          {% if f.folder not in ['Inbox', 'INBOX', profile.ready_folder, 'Trash', 'Sent', 'Sent Items', 'Draft', 'Drafts'] %}
+          <input type="checkbox" class="pick"
+            data-kind="folder"
+            data-value="{{ f.folder }}"
+            data-cnt="{{ f.cnt }}" />
+          {% endif %}
+        </td>
+        <td class="mono">{{ f.folder }}</td>
+        <td>{{ f.cnt }}</td>
+        <td>{{ format_size(f.bytes) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<h3>Largest (by RFC822.SIZE)</h3>
+<table>
+  <thead><tr><th>Size</th><th>From</th><th>Subject</th><th>Folder</th></tr></thead>
+  <tbody>
+  {% for m in data.largest %}
+    <tr>
+      <td>{{ format_size(m.size) }}</td>
+      <td class="mono">{{ m.from_addr }}</td>
+      <td class="subject">{{ m.subject }}</td>
+      <td class="mono">{{ m.folder }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+{% block scripts %}
+<script>
+const selfEmail = {{ profile.email|lower|tojson }};
+const selfDomain = (selfEmail.split('@')[1] || '').toLowerCase();
+const topN = {{ data.top_n|default(100) }};
+let senderOffset = {{ data.sender_offset }} + {{ data.top_senders|length }};
+let domainOffset = {{ data.domain_offset }} + {{ data.top_domains|length }};
+let sendersHasMore = {{ 'true' if data.senders_has_more else 'false' }};
+let domainsHasMore = {{ 'true' if data.domains_has_more else 'false' }};
+
+const picks = () => [...document.querySelectorAll('.pick:checked')];
+const countEl = document.getElementById('checked-count');
+const btnCleanup = document.getElementById('btn-create-rules');
+const btnKeep = document.getElementById('btn-keep-rules');
+const resultEl = document.getElementById('action-result');
+
+function formatSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
+  return (n/1073741824).toFixed(1) + ' GB';
+}
+function flagHtml(flags) {
+  return (flags || []).map(f =>
+    `<span class="mono muted" style="font-size:0.75rem;border:1px solid #8884;padding:0.05rem 0.3rem;margin-right:0.25rem">${f}</span>`
+  ).join('');
+}
+function refreshCount() {
+  const n = picks().length;
+  countEl.textContent = n + ' selected';
+  btnCleanup.disabled = n === 0;
+  btnKeep.disabled = n === 0;
+}
+function wirePick(cb) {
+  cb.addEventListener('change', refreshCount);
+}
+document.querySelectorAll('.pick').forEach(wirePick);
+
+function wireSection(section) {
+  const sectionPicks = () => [...section.querySelectorAll('.pick')];
+  section.querySelector('.section-sel-all')?.addEventListener('click', () => {
+    sectionPicks().forEach(c => { c.checked = true; });
+    refreshCount();
+  });
+  section.querySelector('.section-sel-none')?.addEventListener('click', () => {
+    sectionPicks().forEach(c => { c.checked = false; });
+    refreshCount();
+  });
+  section.querySelector('.section-sel-threshold')?.addEventListener('click', () => {
+    const thr = Number(section.querySelector('.section-threshold')?.value || 1);
+    sectionPicks().forEach(c => {
+      c.checked = Number(c.dataset.cnt || 0) >= thr;
+    });
+    refreshCount();
+  });
+  section.querySelector('.section-sel-heuristic')?.addEventListener('click', () => {
+    sectionPicks().forEach(c => {
+      if (c.dataset.heuristic === '1') c.checked = true;
+    });
+    refreshCount();
+  });
+}
+document.querySelectorAll('.insight-section').forEach(wireSection);
+
+document.getElementById('sel-none-all')?.addEventListener('click', () => {
+  document.querySelectorAll('.pick').forEach(c => { c.checked = false; });
+  refreshCount();
+});
+document.getElementById('btn-heuristic-check')?.addEventListener('click', () => {
+  document.querySelectorAll('.pick[data-heuristic="1"]').forEach(c => { c.checked = true; });
+  refreshCount();
+  resultEl.textContent = 'Pre-checked heuristic-likely rows — uncheck anyone you know, then Create cleanup rules or Keep.';
+});
+
+async function loadMore(kind) {
+  const offset = kind === 'senders' ? senderOffset : domainOffset;
+  const qs = new URLSearchParams({
+    top_n: String(topN),
+    sender_offset: kind === 'senders' ? String(offset) : '0',
+    domain_offset: kind === 'domains' ? String(offset) : '0',
+  });
+  const res = await fetch('/api/discover?' + qs.toString());
+  const data = await res.json();
+  if (kind === 'senders') {
+    const body = document.getElementById('senders-body');
+    for (const s of data.top_senders || []) {
+      if (!s.from_addr || s.from_addr.toLowerCase() === selfEmail) continue;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="checkbox" class="pick" data-kind="from_address"
+          data-value="${s.from_addr}" data-cnt="${s.cnt}"
+          data-heuristic="${s.heuristic_likely ? 1 : 0}" /></td>
+        <td class="mono">${s.from_addr}</td>
+        <td>${flagHtml(s.heuristic_flags)}</td>
+        <td>${s.cnt}</td>
+        <td>${formatSize(s.bytes)}</td>`;
+      body.appendChild(tr);
+      wirePick(tr.querySelector('.pick'));
+    }
+    senderOffset += (data.top_senders || []).length;
+    sendersHasMore = !!data.senders_has_more;
+    if (!sendersHasMore) document.getElementById('load-more-senders')?.remove();
+  } else {
+    const body = document.getElementById('domains-body');
+    for (const s of data.top_domains || []) {
+      if (!s.from_domain || s.from_domain.toLowerCase() === selfDomain) continue;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="checkbox" class="pick" data-kind="from_domain"
+          data-value="${s.from_domain}" data-cnt="${s.cnt}"
+          data-heuristic="${s.heuristic_likely ? 1 : 0}" /></td>
+        <td class="mono">${s.from_domain}</td>
+        <td>${flagHtml(s.heuristic_flags)}</td>
+        <td>${s.cnt}</td>
+        <td>${formatSize(s.bytes)}</td>`;
+      body.appendChild(tr);
+      wirePick(tr.querySelector('.pick'));
+    }
+    domainOffset += (data.top_domains || []).length;
+    domainsHasMore = !!data.domains_has_more;
+    if (!domainsHasMore) document.getElementById('load-more-domains')?.remove();
+  }
+  refreshCount();
+}
+document.getElementById('load-more-senders')?.addEventListener('click', () => loadMore('senders'));
+document.getElementById('load-more-domains')?.addEventListener('click', () => loadMore('domains'));
+
+async function submitInsights(action) {
+  const selections = picks().map(cb => ({
+    kind: cb.dataset.kind,
+    value: ['older_than_days', 'list_unsubscribe_older_than'].includes(cb.dataset.kind)
+      ? Number(cb.dataset.value) : cb.dataset.value,
+  }));
+  if (!selections.length) return;
+  if (action === 'keep' && selections.some(s =>
+      s.kind === 'older_than_days' || s.kind === 'list_unsubscribe_older_than')) {
+    resultEl.textContent = 'Uncheck age / List-Unsubscribe rules before Keep.';
+    return;
+  }
+  btnCleanup.disabled = true;
+  btnKeep.disabled = true;
+  const label = action === 'keep' ? 'Saving keep rules…' : 'Creating suggestions…';
+  resultEl.textContent = label + ` (starting ${selections.length} picks)…`;
+  const res = await fetch('/api/rules/from-insights?background=1', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ selections, action }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    resultEl.textContent = typeof data.detail === 'string' ? data.detail : (data.detail ? JSON.stringify(data.detail) : 'Failed');
+    refreshCount();
+    return;
+  }
+  try {
+    const final = await MJProgress.pollUntil('/api/rules/from-insights/status', {
+      intervalMs: 500,
+      onTick: (s) => {
+        resultEl.textContent = s.message || (label + ' · ' + s.state);
+      },
+    });
+    if (final.state === 'error') {
+      resultEl.textContent = final.error || 'Failed';
+      refreshCount();
+      return;
+    }
+    const result = final.result || {};
+    const n = result.created || (result.created_rule_ids || []).length;
+    resultEl.textContent = `Created ${n} · opening…`;
+    const next = result.next || (action === 'keep' ? '/rules' : '/suggestions?focus=session');
+    if (window.mjNavigate) window.mjNavigate(next);
+    else location.href = (window.MJ_BASE || '') + (String(next).startsWith('/') ? next : '/' + next);
+  } catch (e) {
+    resultEl.textContent = String(e);
+    refreshCount();
+  }
+}
+
+btnCleanup.addEventListener('click', () => submitInsights('stage'));
+btnKeep.addEventListener('click', () => submitInsights('keep'));
+
+document.getElementById('btn-propose')?.addEventListener('click', async () => {
+  const kinds = [];
+  if (document.getElementById('propose-senders')?.checked) kinds.push('from_address');
+  if (document.getElementById('propose-domains')?.checked) kinds.push('from_domain');
+  if (!kinds.length) {
+    resultEl.textContent = 'Pick Senders and/or Domains for propose.';
+    return;
+  }
+  resultEl.textContent = 'Proposing batch (still review before any move)…';
+  const res = await fetch('/api/rules/propose-batch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      min_count: Number(document.getElementById('propose-min').value || 20),
+      limit: Number(document.getElementById('propose-limit').value || 50),
+      kinds,
+      heuristic_only: !!document.getElementById('propose-heuristic')?.checked,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    resultEl.textContent = typeof data.detail === 'string' ? data.detail : 'Failed';
+    return;
+  }
+  if (window.mjNavigate) window.mjNavigate(data.next || '/suggestions');
+  else location.href = (window.MJ_BASE || '') + (data.next || '/suggestions');
+});
+
+document.getElementById('btn-stage-junk')?.addEventListener('click', async () => {
+  const el = document.getElementById('junk-stage-result');
+  const btn = document.getElementById('btn-stage-junk');
+  const limit = Number(document.getElementById('junk-stage-limit')?.value || 500);
+  if (!confirm(`Stage up to ${limit} high-confidence junk messages for Review? Keep rules still apply.`)) {
+    return;
+  }
+  btn.disabled = true;
+  el.textContent = 'Scoring and staging…';
+  try {
+    const res = await fetch('/api/stage/junk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ confidence: 'junk', limit, clear: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      el.textContent = typeof data.detail === 'string' ? data.detail : 'Failed';
+      btn.disabled = false;
+      return;
+    }
+    const n = data.staged_included || data.matched || 0;
+    if (!(n > 0)) {
+      el.textContent = 'No high-confidence junk left to stage.';
+      btn.disabled = false;
+      return;
+    }
+    el.textContent = `Staged ${n} · opening review…`;
+    setTimeout(() => { location.href = (window.MJ_BASE || '') + '/review?sort=triage'; }, 400);
+  } catch (e) {
+    el.textContent = String(e);
+    btn.disabled = false;
+  }
+});
+
+refreshCount();
+</script>
+{% endblock %}

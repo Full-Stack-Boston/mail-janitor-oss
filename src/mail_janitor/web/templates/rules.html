@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Rules — {{ profile.name }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<h2>Rules</h2>
+<p class="muted">Keep-rules always win. Previews use metadata samples from SQLite only.</p>
+
+<div class="toolbar">
+  <form id="stage-form" style="display:flex;gap:0.5rem;align-items:center;">
+    <label><input type="checkbox" name="clear" value="1" /> Clear staged first</label>
+    <button type="submit">Re-stage all stage rules</button>
+  </form>
+</div>
+<pre id="stage-result" class="mono muted"></pre>
+
+<h3>Keep ({{ ruleset.keep|length }})</h3>
+<p class="muted">Keep always wins over stage. Managed from Insights (“Keep / preserve”) or Review (“Keep sender”).</p>
+<table>
+  <thead><tr><th>ID</th><th>Label</th><th>Criteria</th><th></th></tr></thead>
+  <tbody>
+  {% for r in ruleset.keep %}
+    <tr>
+      <td class="mono">{{ r.id }}</td>
+      <td>{{ r.label }}</td>
+      <td class="mono">{{ r.raw }}</td>
+      <td><button type="button" class="secondary keep-del" data-rule-id="{{ r.id }}">Remove</button></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No keep rules yet. On Insights, select senders/domains/folders → Keep / preserve.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h3>Stage rules + live preview</h3>
+{% for p in previews %}
+<section class="preflight">
+  <h4>{{ p.label }} <span class="mono muted">({{ p.rule_id }})</span></h4>
+  <p><strong>{{ p.match_count }}</strong> matches · {{ p.total_bytes_human }} · {{ p.note }}</p>
+  <table>
+    <thead><tr><th>Date</th><th>From</th><th>Subject</th><th>Folder</th><th>Size</th></tr></thead>
+    <tbody>
+    {% for s in p.samples %}
+      <tr>
+        <td class="mono">{{ s.date_human }}</td>
+        <td class="mono">{{ s.from_addr }}</td>
+        <td class="subject">{{ s.subject }}</td>
+        <td class="mono">{{ s.folder }}</td>
+        <td>{{ s.size_human }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No samples</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<p class="muted">No stage rules. Edit <span class="mono">{{ profile.rules_path }}</span> or add one below.</p>
+{% endfor %}
+
+<section class="preflight" style="margin:1rem 0">
+  <h3 style="margin-top:0">Generic business senders</h3>
+  <p class="muted" style="font-size:0.95rem">
+    One cleanup rule for automated From prefixes:
+    <span class="mono">noreply@</span>, <span class="mono">info@</span>,
+    <span class="mono">no-reply@</span>, <span class="mono">notifications@</span>, and similar.
+    Keep rules still win — use <a href="{{ base_path }}/keepers">Keep explorer</a> for real people on those domains first.
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem;align-items:center">
+    <button type="button" id="btn-preview-business">Preview matches</button>
+    <button type="button" id="btn-add-business">Add cleanup rule</button>
+    <span id="business-result" class="mono muted"></span>
+  </div>
+</section>
+
+<h3>Add stage rule</h3>
+<form id="add-rule" class="preflight">
+  <div class="toolbar">
+    <input name="id" placeholder="rule id" required />
+    <input name="label" placeholder="label" />
+    <input name="from_domain" placeholder="from_domain" />
+    <input name="from_address" placeholder="from_address (exact)" />
+    <input name="from_address_prefix" placeholder="from prefix (e.g. noreply@)" />
+    <input name="subject_contains" placeholder="subject_contains" />
+    <input name="older_than_days" type="number" placeholder="older_than_days" />
+    <input name="folder" placeholder="folder" />
+    <input name="min_size" type="number" placeholder="min_size bytes" />
+    <label><input type="checkbox" name="has_list_unsubscribe" /> has List-Unsubscribe</label>
+    <button type="submit">Save rule</button>
+  </div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('stage-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const el = document.getElementById('stage-result');
+  const fd = new FormData(e.target);
+  el.textContent = 'Starting stage…';
+  const res = await fetch('/api/stage?background=1', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    el.textContent = JSON.stringify(data, null, 2);
+    return;
+  }
+  const final = await MJProgress.pollUntil('/api/stage/status', {
+    onTick: (s) => { el.textContent = s.message || JSON.stringify(s, null, 2); },
+  });
+  el.textContent = JSON.stringify(final.result || final, null, 2);
+});
+document.querySelectorAll('.keep-del').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Remove this keep rule?')) return;
+    const res = await fetch('/api/rules/keep/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ rule_id: btn.dataset.ruleId }),
+    });
+    if (res.ok) location.reload();
+    else alert(await res.text());
+  });
+});
+async function loadBusinessPreview() {
+  const el = document.getElementById('business-result');
+  el.textContent = '…';
+  const res = await fetch('/api/rules/business-prefixes/preview');
+  const data = await res.json();
+  if (!res.ok) { el.textContent = data.detail || 'Failed'; return data; }
+  el.textContent = `${data.match_count} messages · ${data.total_bytes_human} (${data.prefix_count} prefixes)`;
+  return data;
+}
+document.getElementById('btn-preview-business')?.addEventListener('click', loadBusinessPreview);
+document.getElementById('btn-add-business')?.addEventListener('click', async () => {
+  const el = document.getElementById('business-result');
+  if (!confirm('Add one cleanup rule for all generic business From prefixes?')) return;
+  const res = await fetch('/api/rules/stage/business-prefixes', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { el.textContent = data.detail || 'Failed'; return; }
+  el.textContent = `Added ${data.rule_id} · ${data.match_count} matches`;
+  setTimeout(() => location.reload(), 600);
+});
+
+document.getElementById('add-rule').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const payload = {};
+  for (const [k, v] of fd.entries()) {
+    if (v === '' || v === null) continue;
+    if (k === 'has_list_unsubscribe') payload[k] = true;
+    else if (['older_than_days', 'min_size'].includes(k)) payload[k] = Number(v);
+    else if (k === 'from_address_prefix') {
+      payload.from_address_prefixes = [v];
+      continue;
+    }
+    else payload[k] = v;
+  }
+  if (!payload.has_list_unsubscribe) delete payload.has_list_unsubscribe;
+  const res = await fetch('/api/rules/stage', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) location.reload();
+  else alert(await res.text());
+});
+</script>
+{% endblock %}

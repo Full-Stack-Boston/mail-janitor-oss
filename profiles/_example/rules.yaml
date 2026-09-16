@@ -1,0 +1,16 @@
+# Keep-rules always win: matching messages are never staged.
+keep:
+  # - id: keep-bank
+  #   from_domain: mybank.com
+  # - id: keep-taxes
+  #   subject_contains: "1099"
+
+# Stage-rules mark candidates for review. Nothing moves until you apply.
+stage:
+  # - id: old-newsletters
+  #   label: "Newsletters older than 2 years"
+  #   has_list_unsubscribe: true
+  #   older_than_days: 730
+  # - id: retailer-x
+  #   from_domain: marketing.example.com
+  #   older_than_days: 365
