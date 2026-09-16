@@ -29,9 +29,44 @@
     <span id="maint-status" class="mono muted"></span>
   </div>
 </section>
+
+<section class="preflight" id="end-stage-panel">
+  <h3 style="margin-top:0">Finish a round</h3>
+  <p class="muted">
+    After you finish evaluating, return protected mail to
+    <span class="mono">{{ profile.inbox_folder }}</span>
+    and send <span class="mono">{{ profile.ready_folder }}</span> to
+    <span class="mono">{{ profile.trash_folder }}</span>
+    for the provider purge schedule.
+  </p>
+  <p class="muted">
+    Protected: <strong id="adv-kept-count">—</strong>
+    · Ready: <strong id="adv-ready-count">—</strong>
+  </p>
+  <p class="muted">Restore phrase:
+    <span class="mono">{{ confirm_restore_inbox }}</span>
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem">
+    <input id="adv-restore-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="RESTORE KEPT TO INBOX" style="min-width:16rem;flex:1" />
+    <button type="button" id="btn-adv-restore" class="primary" disabled>Return kept → Inbox</button>
+  </div>
+  <p class="muted" style="margin-top:1rem">Trash phrase:
+    <span class="mono">{{ confirm_trash }}</span>
+  </p>
+  <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem">
+    <input id="adv-trash-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="MOVE TO TRASH" style="min-width:16rem;flex:1" />
+    <button type="button" id="btn-adv-trash" class="danger" disabled>Ready → Trash</button>
+  </div>
+  <p id="adv-end-status" class="mono muted"></p>
+</section>
 {% endblock %}
 {% block scripts %}
 <script>
+const confirmRestoreInbox = {{ confirm_restore_inbox | tojson }};
+const confirmTrash = {{ confirm_trash | tojson }};
+
 document.getElementById('btn-archive-dormant')?.addEventListener('click', async () => {
   const el = document.getElementById('maint-status');
   el.textContent = 'Archiving…';
@@ -45,6 +80,82 @@ document.getElementById('btn-repair-blank')?.addEventListener('click', async () 
   const res = await fetch('/api/refresh-blank-headers', { method: 'POST' });
   const data = await res.json().catch(() => ({}));
   el.textContent = res.ok ? `Repaired ${data.repaired || 0}` : (data.detail || 'Failed');
+});
+
+function syncAdvEndButtons() {
+  const restoreOk = document.getElementById('adv-restore-input')?.value.trim() === confirmRestoreInbox;
+  const trashOk = document.getElementById('adv-trash-input')?.value.trim() === confirmTrash;
+  document.getElementById('btn-adv-restore').disabled = !restoreOk;
+  document.getElementById('btn-adv-trash').disabled = !trashOk;
+}
+document.getElementById('adv-restore-input')?.addEventListener('input', syncAdvEndButtons);
+document.getElementById('adv-trash-input')?.addEventListener('input', syncAdvEndButtons);
+
+async function refreshAdvEndStage() {
+  const res = await fetch('/api/end-stage', { cache: 'no-store' });
+  if (!res.ok) return;
+  const d = await res.json();
+  document.getElementById('adv-kept-count').textContent = Number(d.kept_count || 0).toLocaleString();
+  document.getElementById('adv-ready-count').textContent = Number(d.ready_count || 0).toLocaleString();
+}
+refreshAdvEndStage();
+
+async function pollAdvEndJob(label) {
+  const line = document.getElementById('adv-end-status');
+  const res = await fetch('/api/apply/status');
+  if (!res.ok) return;
+  const s = await res.json();
+  if (s.state === 'running') {
+    line.textContent = s.message || 'Working…';
+    setTimeout(() => pollAdvEndJob(label), 2000);
+    return;
+  }
+  syncAdvEndButtons();
+  if (s.state === 'error') {
+    line.textContent = s.error || s.message || 'Failed';
+    return;
+  }
+  const result = s.result || {};
+  const n = result.restored ?? result.moved_to_trash ?? 0;
+  line.textContent = `${label}: ${n}`;
+  refreshAdvEndStage();
+}
+
+document.getElementById('btn-adv-restore')?.addEventListener('click', async () => {
+  const typed = document.getElementById('adv-restore-input').value.trim();
+  if (typed !== confirmRestoreInbox) return;
+  document.getElementById('btn-adv-restore').disabled = true;
+  document.getElementById('btn-adv-trash').disabled = true;
+  document.getElementById('adv-end-status').textContent = 'Starting restore…';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/end-stage/restore-kept', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    document.getElementById('adv-end-status').textContent = data.detail || 'Failed';
+    syncAdvEndButtons();
+    return;
+  }
+  pollAdvEndJob('Restored to Inbox');
+});
+
+document.getElementById('btn-adv-trash')?.addEventListener('click', async () => {
+  const typed = document.getElementById('adv-trash-input').value.trim();
+  if (typed !== confirmTrash) return;
+  if (!confirm('Move ready2delete → Trash for provider purge?')) return;
+  document.getElementById('btn-adv-restore').disabled = true;
+  document.getElementById('btn-adv-trash').disabled = true;
+  document.getElementById('adv-end-status').textContent = 'Starting trash move…';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/end-stage/to-trash', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    document.getElementById('adv-end-status').textContent = data.detail || 'Failed';
+    syncAdvEndButtons();
+    return;
+  }
+  pollAdvEndJob('Moved to Trash');
 });
 </script>
 {% endblock %}

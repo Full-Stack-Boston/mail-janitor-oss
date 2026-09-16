@@ -65,10 +65,11 @@
   <h2>Confirm phrases</h2>
   <ul>
     <li><span class="mono">{{ confirm_kept }}</span> — move Inbox keep matches → {{ profile.kept_folder }}</li>
-    <li><span class="mono">{{ confirm_undo_kept }}</span> — restore from {{ profile.kept_folder }} → Inbox</li>
+    <li><span class="mono">{{ confirm_restore_inbox }}</span> — restore from {{ profile.kept_folder }} → Inbox (end of round)</li>
+    <li><span class="mono">{{ confirm_undo_kept }}</span> — same restore (legacy phrase)</li>
     <li><span class="mono">{{ confirm_ready }}</span> — move included staged → {{ profile.ready_folder }}</li>
     <li><span class="mono">{{ confirm_undo }}</span> — restore from {{ profile.ready_folder }}</li>
-    <li><span class="mono">{{ confirm_trash }}</span> — {{ profile.ready_folder }} → Trash (7-day purge)</li>
+    <li><span class="mono">{{ confirm_trash }}</span> — {{ profile.ready_folder }} → Trash (provider purge schedule)</li>
   </ul>
 </section>
 {% endblock %}

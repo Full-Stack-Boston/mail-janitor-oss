@@ -10,15 +10,18 @@ from mail_janitor import __version__
 from mail_janitor.apply import (
     CONFIRM_KEPT,
     CONFIRM_READY,
+    CONFIRM_RESTORE_INBOX,
     CONFIRM_TRASH,
     CONFIRM_UNDO,
     CONFIRM_UNDO_KEPT,
     apply_to_kept,
     apply_to_ready,
     list_moves,
+    preflight_end_stage,
     preflight_kept_inbox,
     preflight_staged,
     ready_to_trash,
+    restore_kept_to_inbox,
     undo_from_kept,
     undo_from_ready,
 )
@@ -195,11 +198,41 @@ def undo_cmd(profile_name: str, confirm: str, limit: int | None) -> None:
 
 @main.command("undo-kept")
 @click.option("-p", "--profile", "profile_name", required=True)
-@click.option("--confirm", required=True, help=f'Must be exactly "{CONFIRM_UNDO_KEPT}"')
+@click.option(
+    "--confirm",
+    required=True,
+    help=f'Must be exactly "{CONFIRM_RESTORE_INBOX}" or "{CONFIRM_UNDO_KEPT}"',
+)
 @click.option("--limit", type=int, default=None)
 def undo_kept_cmd(profile_name: str, confirm: str, limit: int | None) -> None:
-    """Move messages from the kept folder back to Inbox."""
+    """Restore Intentionally Kept mail back to Inbox (moves audit)."""
     result = undo_from_kept(load_profile(profile_name), confirm=confirm, limit=limit)
+    _print_json(result)
+
+
+@main.command("restore-kept")
+@click.option("-p", "--profile", "profile_name", required=True)
+@click.option(
+    "--confirm",
+    required=True,
+    help=f'Must be exactly "{CONFIRM_RESTORE_INBOX}" or "{CONFIRM_UNDO_KEPT}"',
+)
+@click.option("--limit", type=int, default=None)
+@click.option(
+    "--no-live-drain",
+    is_flag=True,
+    help="Skip live IMAP sweep of leftover UIDs still in the kept folder",
+)
+def restore_kept_cmd(
+    profile_name: str, confirm: str, limit: int | None, no_live_drain: bool
+) -> None:
+    """End-of-round: move kept-folder mail back into Inbox."""
+    result = restore_kept_to_inbox(
+        load_profile(profile_name),
+        confirm=confirm,
+        limit=limit,
+        drain_live=not no_live_drain,
+    )
     _print_json(result)
 
 
@@ -207,14 +240,32 @@ def undo_kept_cmd(profile_name: str, confirm: str, limit: int | None) -> None:
 @click.option("-p", "--profile", "profile_name", required=True)
 @click.option("--confirm", required=True, help=f'Must be exactly "{CONFIRM_TRASH}"')
 @click.option("--batch-size", default=100, show_default=True)
-def to_trash_cmd(profile_name: str, confirm: str, batch_size: int) -> None:
-    """Move a batch from ready2delete to Trash (Yahoo: 7-day auto-purge)."""
+@click.option(
+    "--all",
+    "drain",
+    is_flag=True,
+    help="Drain batches until ready2delete is empty (or a batch makes no progress)",
+)
+def to_trash_cmd(profile_name: str, confirm: str, batch_size: int, drain: bool) -> None:
+    """Move ready2delete into Trash for the provider's purge schedule."""
     click.echo(
         "WARNING: Yahoo Trash empties after 7 days and you cannot change that.",
         err=True,
     )
-    result = ready_to_trash(load_profile(profile_name), confirm=confirm, batch_size=batch_size)
+    result = ready_to_trash(
+        load_profile(profile_name),
+        confirm=confirm,
+        batch_size=batch_size,
+        drain=drain,
+    )
     _print_json(result)
+
+
+@main.command("end-stage")
+@click.option("-p", "--profile", "profile_name", required=True)
+def end_stage_cmd(profile_name: str) -> None:
+    """Show end-of-round counts (kept→Inbox and ready→Trash)."""
+    _print_json(preflight_end_stage(load_profile(profile_name)))
 
 
 @main.command("moves")

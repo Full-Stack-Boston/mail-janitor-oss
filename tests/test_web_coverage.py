@@ -32,6 +32,12 @@ class Job:
     def start_apply_kept(self, *a, **k):
         return self.start()
 
+    def start_restore_kept(self, *a, **k):
+        return self.start()
+
+    def start_to_trash(self, *a, **k):
+        return self.start()
+
     def acknowledge(self):
         return self.status()
 
@@ -198,6 +204,9 @@ stage:
     monkeypatch.setattr(web, "undo_from_ready", lambda *a, **k: {"restored": 1})
     monkeypatch.setattr(web, "undo_from_kept", lambda *a, **k: {"restored": 1})
     monkeypatch.setattr(web, "ready_to_trash", lambda *a, **k: {"moved": 1})
+    monkeypatch.setattr(
+        web, "preflight_end_stage", lambda *a, **k: {"kept_count": 1, "ready_count": 2}
+    )
 
     body_client = SimpleNamespace(
         select=lambda *a, **k: None,
@@ -385,6 +394,9 @@ def test_web_mutating_happy_paths(web_client, monkeypatch):
         ("post", "/api/undo", {"data": {"confirm": "x"}}),
         ("post", "/api/undo-kept", {"data": {"confirm": "x"}}),
         ("post", "/api/to-trash", {"data": {"confirm": "x", "batch_size": 1}}),
+        ("get", "/api/end-stage", {}),
+        ("post", "/api/end-stage/restore-kept", {"data": {"confirm": "x"}}),
+        ("post", "/api/end-stage/to-trash", {"data": {"confirm": "x", "batch_size": 1}}),
         (
             "post",
             "/api/rules/from-insights?background=1",
@@ -684,6 +696,19 @@ def test_web_function_error_branches(web_client, monkeypatch):
         assert c.post(path, data={"confirm": "x"}).status_code == 400
 
     monkeypatch.setattr(
+        web.APPLY_JOBS,
+        "start_restore_kept",
+        lambda *a, **k: {"ok": False, "error": "busy"},
+    )
+    assert c.post("/api/end-stage/restore-kept", data={"confirm": "x"}).status_code == 409
+    monkeypatch.setattr(
+        web.APPLY_JOBS,
+        "start_to_trash",
+        lambda *a, **k: {"ok": False, "error": "busy"},
+    )
+    assert c.post("/api/end-stage/to-trash", data={"confirm": "x"}).status_code == 409
+
+    monkeypatch.setattr(
         web,
         "rules_from_insight_selections",
         lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")),
@@ -885,3 +910,148 @@ def test_client_mode_middleware_and_sessions(tmp_path, monkeypatch):
     )
     with pytest.raises(Exception):
         c.get("/guide", headers=h)
+
+
+def test_base_template_includes_scripts_block():
+    """If base.html omits {% block scripts %}, guide/insights JS never loads."""
+    templates = Path(__file__).resolve().parents[1] / "src/mail_janitor/web/templates"
+    base = (templates / "base.html").read_text(encoding="utf-8")
+    guide = (templates / "guide.html").read_text(encoding="utf-8")
+    assert "{% block scripts %}" in base
+    assert "{% block scripts %}" in guide
+    assert "btn-test-connect" in guide
+    assert "Checking your sign-in" in guide
+
+
+def test_guide_connect_restores_env_on_imap_failure(web_client, monkeypatch, tmp_path):
+    c, web = web_client.client, web_client.web
+    profile_dir = tmp_path / "restore-me"
+    profile_dir.mkdir()
+    env_path = profile_dir / ".env"
+    env_path.write_text(
+        "MAIL_JANITOR_EMAIL=old@x\nMAIL_JANITOR_APP_PASSWORD=oldpw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web, "ensure_profile_files", lambda n: profile_dir)
+    monkeypatch.setattr(web, "apply_provider_pack", lambda *a, **k: None)
+    monkeypatch.setattr(
+        web,
+        "write_profile_credentials",
+        lambda *a, **k: env_path.write_text(
+            "MAIL_JANITOR_EMAIL=new@x\nMAIL_JANITOR_APP_PASSWORD=newpw\n",
+            encoding="utf-8",
+        ),
+    )
+    monkeypatch.setattr(
+        web, "test_imap_connection", lambda p: (_ for _ in ()).throw(ValueError("bad"))
+    )
+    assert (
+        c.post(
+            "/api/guide/connect",
+            json={
+                "profile_name": "restore-me",
+                "provider": "imap",
+                "email": "new@x",
+                "app_password": "newpw",
+                "imap_host": "imap.example.com",
+            },
+        ).status_code
+        == 400
+    )
+    assert "old@x" in env_path.read_text(encoding="utf-8")
+
+
+def test_guide_connect_client_mode_clears_creds_on_failure(web_client, monkeypatch):
+    c, web = web_client.client, web_client.web
+    monkeypatch.setattr(web, "client_mode", lambda: True)
+    monkeypatch.setattr(web, "current_uid", lambda: "sess1")
+    monkeypatch.setattr(web, "validate_imap_host", lambda *a, **k: "imap.example.com")
+    monkeypatch.setattr(web, "apply_provider_pack", lambda *a, **k: None)
+    monkeypatch.setattr(web, "ensure_profile_files", lambda n: web_client.profile.path)
+    monkeypatch.setattr(web, "write_profile_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(
+        web, "test_imap_connection", lambda p: (_ for _ in ()).throw(ValueError("bad"))
+    )
+    cleared = []
+    restored = []
+
+    import mail_janitor.client_sessions as sessions
+
+    monkeypatch.setattr(sessions, "load_credentials", lambda n: None)
+    monkeypatch.setattr(sessions, "clear_credentials", lambda n: cleared.append(n))
+    assert (
+        c.post(
+            "/api/guide/connect",
+            json={
+                "provider": "imap",
+                "email": "a@x",
+                "app_password": "x",
+                "imap_host": "imap.example.com",
+            },
+            headers={"X-authentik-uid": "sess1"},
+        ).status_code
+        == 400
+    )
+    assert cleared == ["sess1"]
+
+    # Prior client creds are restored when IMAP fails.
+    monkeypatch.setattr(
+        sessions, "load_credentials", lambda n: ("old@x", "oldpw")
+    )
+    monkeypatch.setattr(
+        sessions,
+        "store_credentials",
+        lambda n, e, p: restored.append((n, e, p)),
+    )
+    assert (
+        c.post(
+            "/api/guide/connect",
+            json={
+                "provider": "imap",
+                "email": "a@x",
+                "app_password": "x",
+                "imap_host": "imap.example.com",
+            },
+            headers={"X-authentik-uid": "sess1"},
+        ).status_code
+        == 400
+    )
+    assert restored == [("sess1", "old@x", "oldpw")]
+
+
+def test_guide_connect_unlink_oserror_is_swallowed(web_client, monkeypatch, tmp_path):
+    c, web = web_client.client, web_client.web
+    profile_dir = tmp_path / "new-only"
+    profile_dir.mkdir()
+    env_path = profile_dir / ".env"
+    monkeypatch.setattr(web, "ensure_profile_files", lambda n: profile_dir)
+    monkeypatch.setattr(web, "apply_provider_pack", lambda *a, **k: None)
+    monkeypatch.setattr(
+        web,
+        "write_profile_credentials",
+        lambda *a, **k: env_path.write_text("x\n", encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        web, "test_imap_connection", lambda p: (_ for _ in ()).throw(ValueError("bad"))
+    )
+    real_unlink = Path.unlink
+
+    def boom(self, *a, **k):
+        if self == env_path:
+            raise OSError("busy")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    assert (
+        c.post(
+            "/api/guide/connect",
+            json={
+                "profile_name": "new-only",
+                "provider": "imap",
+                "email": "a@x",
+                "app_password": "x",
+                "imap_host": "imap.example.com",
+            },
+        ).status_code
+        == 400
+    )

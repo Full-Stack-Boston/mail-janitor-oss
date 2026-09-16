@@ -175,6 +175,18 @@ def store_credentials(uid: str, email: str, app_password: str) -> None:
     touch_activity(sid)
 
 
+def clear_credentials(uid: str) -> None:
+    """Drop in-memory and wipeable session secrets for a client workspace."""
+    sid = safe_uid(uid)
+    with _CREDS_LOCK:
+        _CREDS.pop(sid, None)
+    secrets = _secrets_path(sid)
+    try:
+        secrets.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def load_credentials(uid: str) -> tuple[str, str] | None:
     sid = safe_uid(uid)
     with _CREDS_LOCK:

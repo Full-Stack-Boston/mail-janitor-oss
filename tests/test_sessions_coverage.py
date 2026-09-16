@@ -176,9 +176,21 @@ def test_session_best_effort_os_errors(tmp_path, monkeypatch):
     (p / ".env").write_text("x")
     monkeypatch.setattr(os, "utime", lambda *a: (_ for _ in ()).throw(OSError("x")))
     s.touch_activity("u")
-    monkeypatch.setattr(Path, "unlink", lambda self: (_ for _ in ()).throw(OSError("x")))
+    monkeypatch.setattr(Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(OSError("x")))
     monkeypatch.setattr(s, "ensure_profile_files", lambda sid: p)
     assert s.ensure_workspace("u") == p
+    # Restore real unlink for clear_credentials happy path
+    monkeypatch.undo()
+    monkeypatch.setenv("MAIL_JANITOR_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("MAIL_JANITOR_PROFILES_DIR", str(tmp_path))
+    s.store_credentials("u", "a@x", "pw")
+    s.clear_credentials("u")
+    assert s.load_credentials("u") is None
+    s.store_credentials("u", "a@x", "pw")
+    monkeypatch.setattr(
+        Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(OSError("x"))
+    )
+    s.clear_credentials("u")
 
 
 def test_session_status_stat_error(monkeypatch):

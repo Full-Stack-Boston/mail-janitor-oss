@@ -19,10 +19,12 @@ from markupsafe import Markup
 from mail_janitor.apply import (
     CONFIRM_KEPT,
     CONFIRM_READY,
+    CONFIRM_RESTORE_INBOX,
     CONFIRM_TRASH,
     CONFIRM_UNDO,
     CONFIRM_UNDO_KEPT,
     apply_to_ready,
+    preflight_end_stage,
     preflight_kept_inbox,
     preflight_staged,
     ready_to_trash,
@@ -47,6 +49,7 @@ from mail_janitor.config import (
     apply_provider_pack,
     create_profile,
     delete_profile,
+    ensure_profile_files,
     list_profiles,
     load_profile,
     profile_summaries,
@@ -275,6 +278,8 @@ def create_app(profile_name: str) -> FastAPI:
                 "inbox_count": inbox,
                 "message_count": msgs,
                 "confirm_ready": CONFIRM_READY,
+                "confirm_restore_inbox": CONFIRM_RESTORE_INBOX,
+                "confirm_trash": CONFIRM_TRASH,
                 "provider_packs": list_provider_packs(),
                 "connected": bool(p.email and p.app_password),
                 "base_path": public_base_path(),
@@ -292,6 +297,8 @@ def create_app(profile_name: str) -> FastAPI:
                 "message_count": message_count(conn),
                 "staged_count": staged_count(conn),
                 "inbox_count": inbox_message_count(conn, p.inbox_folder),
+                "confirm_restore_inbox": CONFIRM_RESTORE_INBOX,
+                "confirm_trash": CONFIRM_TRASH,
             }
         finally:
             conn.close()
@@ -312,6 +319,7 @@ def create_app(profile_name: str) -> FastAPI:
                 "confirm_trash": CONFIRM_TRASH,
                 "confirm_undo": CONFIRM_UNDO,
                 "confirm_undo_kept": CONFIRM_UNDO_KEPT,
+                "confirm_restore_inbox": CONFIRM_RESTORE_INBOX,
                 "kept_folder": p.kept_folder,
                 "inbox_folder": p.inbox_folder,
                 "scan_status": SCAN_JOBS.status(),
@@ -1150,12 +1158,46 @@ def create_app(profile_name: str) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
     @app.post("/api/to-trash")
-    def api_to_trash(confirm: str = Form(...), batch_size: int = Form(100)):
+    def api_to_trash(
+        confirm: str = Form(...),
+        batch_size: int = Form(100),
+        drain: bool = Form(False),
+    ):
         p = get_profile()
         try:
-            return ready_to_trash(p, confirm=confirm, batch_size=batch_size)
+            return ready_to_trash(
+                p, confirm=confirm, batch_size=batch_size, drain=drain
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @app.get("/api/end-stage")
+    def api_end_stage():
+        return preflight_end_stage(get_profile())
+
+    @app.post("/api/end-stage/restore-kept")
+    def api_end_stage_restore_kept(confirm: str = Form(...)):
+        p = get_profile()
+        started = APPLY_JOBS.start_restore_kept(p.name, confirm=confirm)
+        if not started.get("ok"):
+            raise HTTPException(
+                status_code=409, detail=started.get("error") or "Job not started"
+            )
+        return started
+
+    @app.post("/api/end-stage/to-trash")
+    def api_end_stage_to_trash(
+        confirm: str = Form(...), batch_size: int = Form(100)
+    ):
+        p = get_profile()
+        started = APPLY_JOBS.start_to_trash(
+            p.name, confirm=confirm, batch_size=batch_size
+        )
+        if not started.get("ok"):
+            raise HTTPException(
+                status_code=409, detail=started.get("error") or "Job not started"
+            )
+        return started
 
     @app.get("/api/open")
     def api_open(folder: str = Query(...), uid: int = Query(...)):
@@ -1537,11 +1579,41 @@ def create_app(profile_name: str) -> FastAPI:
                 name = str(body.get("profile_name") or app.state.profile_name).strip()
                 host = str(imap_host) if imap_host else None
             apply_provider_pack(name, provider, imap_host=host)
+            # Keep prior credentials until IMAP proves the new ones work.
+            previous_creds = None
+            if client_mode():
+                from mail_janitor.client_sessions import load_credentials, store_credentials
+
+                previous_creds = load_credentials(name)
+            path = ensure_profile_files(name)
+            env_path = path / ".env"
+            previous_env = (
+                None
+                if client_mode()
+                else (env_path.read_text(encoding="utf-8") if env_path.exists() else None)
+            )
             write_profile_credentials(name, email, password)
+            try:
+                result = test_imap_connection(load_profile(name))
+            except Exception:
+                if client_mode():
+                    from mail_janitor.client_sessions import clear_credentials, store_credentials
+
+                    if previous_creds:
+                        store_credentials(name, previous_creds[0], previous_creds[1])
+                    else:
+                        clear_credentials(name)
+                elif previous_env is None:
+                    try:
+                        env_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                else:
+                    env_path.write_text(previous_env, encoding="utf-8")
+                raise
             switched = (not client_mode()) and name != app.state.profile_name
             if not client_mode():
                 app.state.profile_name = name
-            result = test_imap_connection(load_profile(name))
             result["switched"] = switched
             return result
         except HTTPException:

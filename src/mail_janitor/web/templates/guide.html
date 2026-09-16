@@ -151,11 +151,43 @@
 </section>
 
 <section class="guide-panel" id="step-done" data-step="5" hidden>
-  <h3>You’re done for now</h3>
+  <h3>Finish this round</h3>
   <p class="step-help" style="font-size:1.2rem;color:var(--ink)">
     Inbox now has <strong id="done-inbox" style="color:var(--ops)">{{ inbox_count }}</strong> messages.
-    Come back any time new mail piles up — we’ll walk you through again.
+    When you are happy with this round, put protected mail back in Inbox and send the junk holding folder to Trash so your provider can purge it later.
   </p>
+
+  <div class="preflight" style="margin:1.25rem 0">
+    <p class="muted" style="margin-top:0">
+      Protected in <span class="mono">{{ profile.kept_folder }}</span>:
+      <strong id="end-kept-count">—</strong>
+      · Waiting in <span class="mono">{{ profile.ready_folder }}</span>:
+      <strong id="end-ready-count">—</strong>
+    </p>
+
+    <h4 style="margin-bottom:0.35rem">1 · Return protected mail to Inbox</h4>
+    <p class="muted" style="margin-top:0">
+      Type <span class="mono" id="end-confirm-restore">{{ confirm_restore_inbox }}</span>
+    </p>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem">
+      <input id="end-restore-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type the phrase" style="min-width:16rem;flex:1" />
+      <button type="button" class="primary" id="btn-end-restore" disabled>Return to Inbox</button>
+    </div>
+
+    <h4 style="margin:1.25rem 0 0.35rem">2 · Send junk holding folder to Trash</h4>
+    <p class="muted" style="margin-top:0">
+      Type <span class="mono" id="end-confirm-trash">{{ confirm_trash }}</span>.
+      Trash is often auto-emptied later by your email company (Yahoo: 7 days).
+    </p>
+    <div class="toolbar" style="flex-wrap:wrap;gap:0.5rem">
+      <input id="end-trash-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type the phrase" style="min-width:16rem;flex:1" />
+      <button type="button" class="danger" id="btn-end-trash" disabled>Move to Trash</button>
+    </div>
+    <p id="end-stage-status" class="status-line muted" style="margin-top:0.75rem"></p>
+  </div>
+
   <div class="toolbar">
     <button type="button" class="primary-lg" id="btn-restart-guide">Clean more mail</button>
   </div>
@@ -172,6 +204,8 @@
 <script>
 const packs = {{ provider_packs | tojson }};
 const confirmReady = {{ confirm_ready | tojson }};
+const confirmRestoreInbox = {{ confirm_restore_inbox | tojson }};
+const confirmTrash = {{ confirm_trash | tojson }};
 const activeProfile = {{ profile.name | tojson }};
 let connectedOk = {{ 'true' if connected else 'false' }};
 let stagedCount = 0;
@@ -293,7 +327,121 @@ async function refreshGuideStats() {
       document.getElementById('done-inbox').textContent = fmt(d.inbox_count);
     }
   } catch (e) {}
+  refreshEndStage();
 }
+
+async function refreshEndStage() {
+  try {
+    const res = await fetch('/api/end-stage', { cache: 'no-store' });
+    if (!res.ok) return;
+    const d = await res.json();
+    const fmt = n => Number(n || 0).toLocaleString();
+    const keptEl = document.getElementById('end-kept-count');
+    const readyEl = document.getElementById('end-ready-count');
+    if (keptEl) keptEl.textContent = fmt(d.kept_count);
+    if (readyEl) readyEl.textContent = fmt(d.ready_count);
+    if (d.confirm_restore_inbox) {
+      const el = document.getElementById('end-confirm-restore');
+      if (el) el.textContent = d.confirm_restore_inbox;
+    }
+    if (d.confirm_trash) {
+      const el = document.getElementById('end-confirm-trash');
+      if (el) el.textContent = d.confirm_trash;
+    }
+  } catch (e) {}
+}
+
+function syncEndButtons() {
+  const restoreOk = document.getElementById('end-restore-input')?.value.trim() === confirmRestoreInbox;
+  const trashOk = document.getElementById('end-trash-input')?.value.trim() === confirmTrash;
+  const restoreBtn = document.getElementById('btn-end-restore');
+  const trashBtn = document.getElementById('btn-end-trash');
+  if (restoreBtn) restoreBtn.disabled = !restoreOk;
+  if (trashBtn) trashBtn.disabled = !trashOk;
+}
+
+document.getElementById('end-restore-input')?.addEventListener('input', syncEndButtons);
+document.getElementById('end-trash-input')?.addEventListener('input', syncEndButtons);
+
+async function pollEndStageJob(doneLabel) {
+  const line = document.getElementById('end-stage-status');
+  const res = await fetch('/api/apply/status');
+  if (!res.ok) return;
+  const s = await res.json();
+  if (s.state === 'running') {
+    line.className = 'status-line muted';
+    line.textContent = s.message || 'Working…';
+    setTimeout(() => pollEndStageJob(doneLabel), 2000);
+    return;
+  }
+  document.getElementById('btn-end-restore').disabled = false;
+  document.getElementById('btn-end-trash').disabled = false;
+  syncEndButtons();
+  if (s.state === 'error') {
+    line.className = 'status-line err';
+    line.textContent = plainError(s.error || s.message);
+    return;
+  }
+  line.className = 'status-line ok';
+  const result = s.result || {};
+  const n = result.restored ?? result.moved_to_trash ?? result.moved ?? 0;
+  line.textContent = doneLabel + ' · ' + Number(n).toLocaleString() + ' messages.';
+  refreshGuideStats();
+}
+
+document.getElementById('btn-end-restore')?.addEventListener('click', async () => {
+  const typed = document.getElementById('end-restore-input').value.trim();
+  if (typed !== confirmRestoreInbox) {
+    alert('Please type the phrase exactly as shown.');
+    return;
+  }
+  const btn = document.getElementById('btn-end-restore');
+  btn.disabled = true;
+  document.getElementById('btn-end-trash').disabled = true;
+  const line = document.getElementById('end-stage-status');
+  line.className = 'status-line muted';
+  line.textContent = 'Returning protected mail to Inbox…';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/end-stage/restore-kept', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    line.className = 'status-line err';
+    line.textContent = plainError(data.detail);
+    syncEndButtons();
+    return;
+  }
+  pollEndStageJob('Protected mail restored to Inbox');
+});
+
+document.getElementById('btn-end-trash')?.addEventListener('click', async () => {
+  const typed = document.getElementById('end-trash-input').value.trim();
+  if (typed !== confirmTrash) {
+    alert('Please type the phrase exactly as shown.');
+    return;
+  }
+  if (!confirm('Move everything in the junk holding folder to Trash?\n\nYour email company may permanently delete Trash later (Yahoo: 7 days).')) {
+    return;
+  }
+  const btn = document.getElementById('btn-end-trash');
+  btn.disabled = true;
+  document.getElementById('btn-end-restore').disabled = true;
+  const line = document.getElementById('end-stage-status');
+  line.className = 'status-line muted';
+  line.textContent = 'Moving junk holding folder to Trash…';
+  const fd = new FormData();
+  fd.set('confirm', typed);
+  const res = await fetch('/api/end-stage/to-trash', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    line.className = 'status-line err';
+    line.textContent = plainError(data.detail);
+    syncEndButtons();
+    return;
+  }
+  pollEndStageJob('Junk holding folder moved to Trash');
+});
+
 
 let scanPollTimer = null;
 let scanElapsedTimer = null;

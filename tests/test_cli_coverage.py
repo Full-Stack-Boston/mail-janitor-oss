@@ -54,7 +54,9 @@ def test_data_commands(runner, monkeypatch, fake_profile):
         "apply_to_ready": {"moved": 1},
         "undo_from_ready": {"restored": 1},
         "undo_from_kept": {"restored": 1},
+        "restore_kept_to_inbox": {"restored": 2},
         "ready_to_trash": {"moved_to_trash": 1},
+        "preflight_end_stage": {"kept_count": 1, "ready_count": 2},
         "list_moves": [],
     }
     for name, result in funcs.items():
@@ -76,7 +78,10 @@ def test_data_commands(runner, monkeypatch, fake_profile):
         ["apply", "-p", "p", "--confirm", "x", "--limit", "1"],
         ["undo", "-p", "p", "--confirm", "x", "--limit", "1"],
         ["undo-kept", "-p", "p", "--confirm", "x", "--limit", "1"],
+        ["restore-kept", "-p", "p", "--confirm", "x", "--limit", "1", "--no-live-drain"],
         ["to-trash", "-p", "p", "--confirm", "x", "--batch-size", "1"],
+        ["to-trash", "-p", "p", "--confirm", "x", "--batch-size", "1", "--all"],
+        ["end-stage", "-p", "p"],
         ["moves", "-p", "p"],
         ["moves", "-p", "p", "--all"],
     ]

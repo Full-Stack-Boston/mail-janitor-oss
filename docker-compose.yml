@@ -16,11 +16,11 @@ services:
     ports:
       - "${MAIL_JANITOR_PERSONAL_PORT:-8787}:8787"
     environment:
-      MAIL_JANITOR_PROFILE: ${MAIL_JANITOR_PROFILE:-demo}
+      MAIL_JANITOR_PROFILE: ${MAIL_JANITOR_PROFILE:-yahoo}
       MAIL_JANITOR_PROFILES_DIR: /data/profiles
       NATHAN_URL: ${NATHAN_URL:-}
       NATHAN_API_KEY: ${NATHAN_API_KEY:-}
-      MAIL_JANITOR_NTFY_TOPIC: ${MAIL_JANITOR_NTFY_TOPIC:-mail-janitor}
+      MAIL_JANITOR_NTFY_TOPIC: ${MAIL_JANITOR_NTFY_TOPIC:-fsb-nathan}
     volumes:
       - ${MAIL_JANITOR_PERSONAL_PROFILES:-./profiles}:/data/profiles
     command:
@@ -28,7 +28,7 @@ services:
         "mail-janitor",
         "review",
         "-p",
-        "${MAIL_JANITOR_PROFILE:-demo}",
+        "${MAIL_JANITOR_PROFILE:-yahoo}",
         "--host",
         "0.0.0.0",
         "--port",

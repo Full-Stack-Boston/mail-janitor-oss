@@ -29,7 +29,8 @@ Every move is appended to `profiles/<name>/audit.jsonl`. There is **no IMAP EXPU
 2. **Review list is metadata only.** Opening a message fetches the body **on request** (brief memory cache; not written to `mail.db`).
 3. **Default apply target is `ready2delete`**, not Trash. Undo returns mail to the original folder.
 4. **Trash is a separate step.** Yahoo **automatically empties Trash after 7 days** and you **cannot** change that ([Yahoo Help](https://help.yahoo.com/kb/trash-spam-folders-regularly-emptied-sln3518.html)). Use `to-trash` only when you accept that clock.
-5. Confirm phrases (exact): `MOVE TO READY2DELETE` · `UNDO FROM READY2DELETE` · `MOVE TO TRASH`
+5. **End of a round:** restore Intentionally Kept → Inbox (`RESTORE KEPT TO INBOX`), then drain `ready2delete` → Trash (`MOVE TO TRASH`, optionally `--all`).
+6. Confirm phrases (exact): `MOVE TO READY2DELETE` · `UNDO FROM READY2DELETE` · `MOVE TO INTENTIONALLY KEPT` · `RESTORE KEPT TO INBOX` · `MOVE TO TRASH`
 
 ## Quick start (local)
 
@@ -61,8 +62,17 @@ mail-janitor preflight -p myyahoo
 mail-janitor apply -p myyahoo --confirm "MOVE TO READY2DELETE"
 # optional
 mail-janitor undo -p myyahoo --confirm "UNDO FROM READY2DELETE"
-mail-janitor to-trash -p myyahoo --confirm "MOVE TO TRASH" --batch-size 100
 ```
+
+Finish a round (protected mail back to Inbox; junk holding folder → Trash):
+
+```bash
+mail-janitor end-stage -p myyahoo
+mail-janitor restore-kept -p myyahoo --confirm "RESTORE KEPT TO INBOX"
+mail-janitor to-trash -p myyahoo --confirm "MOVE TO TRASH" --all
+```
+
+The guided UI step **5 · Done** and Advanced → Finish a round expose the same actions.
 
 ### Yahoo setup
 
@@ -160,9 +170,7 @@ pytest
 ```
 
 ## Lab / Mission Control (operators)
-
-Status endpoint for cards: `GET /api/mission-control/status`.
+Status endpoint for cards: `GET /api/mission-control/status`.  
 Portal card (after site deploy): `/portal/mail-janitor`.
 
-Personalized profiles stay on a private volume; this public tree only ships `profiles/_example/`.
-See [`docs/SANITIZE.md`](docs/SANITIZE.md) before publishing forks.
+Personalized profiles stay on a private volume; public/OSS trees only ship `profiles/_example/`.

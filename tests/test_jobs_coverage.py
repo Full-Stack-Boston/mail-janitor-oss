@@ -53,10 +53,16 @@ def test_apply_job_manager(monkeypatch):
     monkeypatch.setattr(jobs, "load_profile", lambda n: SimpleNamespace())
     monkeypatch.setattr(jobs, "apply_to_ready", lambda *a, **k: {"moved": 2})
     monkeypatch.setattr(jobs, "apply_to_kept", lambda *a, **k: {"moved": 1})
+    monkeypatch.setattr(jobs, "restore_kept_to_inbox", lambda *a, **k: {"restored": 3})
+    monkeypatch.setattr(jobs, "ready_to_trash", lambda *a, **k: {"moved_to_trash": 4})
     assert mgr.start_apply("p", "yes")["ok"]
     mgr._thread.target(*mgr._thread.args)
     assert mgr.status()["state"] == "done"
     assert mgr.start_apply_kept("p", "yes")["ok"]
+    mgr._thread.target(*mgr._thread.args)
+    assert mgr.start_restore_kept("p", "yes")["ok"]
+    mgr._thread.target(*mgr._thread.args)
+    assert mgr.start_to_trash("p", "yes", batch_size=50)["ok"]
     mgr._thread.target(*mgr._thread.args)
     assert notified
     mgr._thread = DeadThread()

@@ -11,6 +11,7 @@ from mail_janitor.apply import (
     apply_to_kept,
     apply_to_ready,
     ready_to_trash,
+    restore_kept_to_inbox,
     undo_from_kept,
     undo_from_ready,
 )
@@ -110,6 +111,39 @@ class ApplyJobManager:
             profile_name,
             job="apply-kept",
             message="Moving kept Inbox mail to intentionally kept folder…",
+            target=target,
+        )
+
+    def start_restore_kept(self, profile_name: str, confirm: str) -> dict[str, Any]:
+        def target() -> dict[str, Any]:
+            return restore_kept_to_inbox(
+                load_profile(profile_name),
+                confirm=confirm,
+                progress_cb=self.heartbeat,
+                drain_live=True,
+            )
+
+        return self._start(
+            profile_name,
+            job="restore-kept",
+            message="Restoring intentionally kept mail to Inbox…",
+            target=target,
+        )
+
+    def start_to_trash(self, profile_name: str, confirm: str, batch_size: int = 100) -> dict[str, Any]:
+        def target() -> dict[str, Any]:
+            return ready_to_trash(
+                load_profile(profile_name),
+                confirm=confirm,
+                batch_size=batch_size,
+                drain=True,
+                progress_cb=self.heartbeat,
+            )
+
+        return self._start(
+            profile_name,
+            job="to-trash",
+            message="Moving ready2delete mail to Trash…",
             target=target,
         )
 

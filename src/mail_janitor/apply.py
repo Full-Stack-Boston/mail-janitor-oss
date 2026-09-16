@@ -20,7 +20,14 @@ CONFIRM_KEPT = "MOVE TO INTENTIONALLY KEPT"
 CONFIRM_TRASH = "MOVE TO TRASH"
 CONFIRM_UNDO = "UNDO FROM READY2DELETE"
 CONFIRM_UNDO_KEPT = "UNDO FROM INTENTIONALLY KEPT"
+# End-of-round phrase (also accepted by undo_from_kept / restore_kept_to_inbox).
+CONFIRM_RESTORE_INBOX = "RESTORE KEPT TO INBOX"
 KEEP_APPLY_RULE_ID = "keep-apply"
+
+
+def _kept_restore_confirm_ok(confirm: str) -> bool:
+    phrase = confirm.strip()
+    return phrase in (CONFIRM_UNDO_KEPT, CONFIRM_RESTORE_INBOX)
 
 
 def _now() -> str:
@@ -675,15 +682,81 @@ def undo_from_ready(
     return {"restored": restored, "errors": errors, "move_batch_size": batch_size}
 
 
+def preflight_end_stage(profile: Profile) -> dict[str, Any]:
+    """Counts for end-of-round restore (kept→Inbox) and trash (ready→Trash)."""
+    conn = init_db(profile.db_path)
+    try:
+        kept_moves = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM moves
+                WHERE undone = 0 AND dest_folder = ? AND dest_uid IS NOT NULL
+                """,
+                (profile.kept_folder,),
+            ).fetchone()[0]
+            or 0
+        )
+        ready_moves = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM moves
+                WHERE undone = 0 AND dest_folder = ? AND dest_uid IS NOT NULL
+                """,
+                (profile.ready_folder,),
+            ).fetchone()[0]
+            or 0
+        )
+        kept_indexed = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE lower(folder) = lower(?)",
+                (profile.kept_folder,),
+            ).fetchone()[0]
+            or 0
+        )
+        ready_indexed = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE lower(folder) = lower(?)",
+                (profile.ready_folder,),
+            ).fetchone()[0]
+            or 0
+        )
+    finally:
+        conn.close()
+    return {
+        "kept_folder": profile.kept_folder,
+        "inbox_folder": profile.inbox_folder,
+        "ready_folder": profile.ready_folder,
+        "trash_folder": profile.trash_folder,
+        "kept_count": max(kept_moves, kept_indexed),
+        "kept_moves": kept_moves,
+        "kept_indexed": kept_indexed,
+        "ready_count": max(ready_moves, ready_indexed),
+        "ready_moves": ready_moves,
+        "ready_indexed": ready_indexed,
+        "confirm_restore_inbox": CONFIRM_RESTORE_INBOX,
+        "confirm_undo_kept": CONFIRM_UNDO_KEPT,
+        "confirm_trash": CONFIRM_TRASH,
+        "trash_warning": (
+            "Provider Trash is often auto-emptied on a fixed schedule "
+            "(Yahoo: 7 days). Recovery after purge is not guaranteed."
+        ),
+    }
+
+
 def undo_from_kept(
     profile: Profile,
     confirm: str,
     move_ids: list[int] | None = None,
     limit: int | None = None,
+    *,
+    progress_cb: Any | None = None,
 ) -> dict[str, Any]:
-    if confirm.strip() != CONFIRM_UNDO_KEPT:
+    """Restore kept-folder moves back to Inbox (end-of-round or undo)."""
+    if not _kept_restore_confirm_ok(confirm):
         raise ValueError(
-            f"Refusing undo: type exactly {CONFIRM_UNDO_KEPT!r} to confirm. Got {confirm!r}."
+            "Refusing undo: type exactly "
+            f"{CONFIRM_RESTORE_INBOX!r} or {CONFIRM_UNDO_KEPT!r} to confirm. "
+            f"Got {confirm!r}."
         )
     provider = get_provider(profile.provider)
     client = provider.connect(profile)
@@ -691,16 +764,18 @@ def undo_from_kept(
     restored = 0
     errors: list[dict] = []
     batch_size = max(1, int(profile.move_batch_size))
-    dest = profile.kept_folder
+    kept = profile.kept_folder
+    inbox = profile.inbox_folder
     try:
-        with_backoff(lambda: client.select(dest, readonly=False))
+        with_backoff(lambda: client.select(kept, readonly=False))
+        client.ensure_folder(inbox)
         sql = """
             SELECT id, source_folder, source_uid, dest_folder, dest_uid,
                    message_id, from_addr, subject, date_ts, size, rule_id
             FROM moves
             WHERE undone = 0 AND dest_folder = ?
         """
-        params: list[Any] = [dest]
+        params: list[Any] = [kept]
         if move_ids:
             placeholders = ",".join("?" for _ in move_ids)
             sql += f" AND id IN ({placeholders})"
@@ -710,82 +785,240 @@ def undo_from_kept(
         if limit is not None:
             rows = rows[:limit]
 
-        by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in rows:
-            if row.get("dest_uid") is None:
-                errors.append({"id": row["id"], "error": "missing dest_uid; undo manually"})
-                continue
-            by_source[row["source_folder"]].append(row)
-
-        for source_folder, group in by_source.items():
-            client.ensure_folder(source_folder)
-            for batch_rows in _chunk_rows(group, batch_size):
-                uids = [int(r["dest_uid"]) for r in batch_rows]
-                by_uid = {int(r["dest_uid"]): r for r in batch_rows}
-                try:
-                    mapping = with_backoff(
-                        lambda u=uids, f=source_folder: client.move_uids(u, f)
+        for batch_rows in _chunk_rows(
+            [r for r in rows if r.get("dest_uid") is not None], batch_size
+        ):
+            uids = [int(r["dest_uid"]) for r in batch_rows]
+            by_uid = {int(r["dest_uid"]): r for r in batch_rows}
+            try:
+                mapping = with_backoff(
+                    lambda u=uids, f=inbox: client.move_uids(u, f)
+                )
+                for uid in uids:
+                    row = by_uid[uid]
+                    new_uid = mapping.get(uid)
+                    conn.execute("UPDATE moves SET undone = 1 WHERE id = ?", (row["id"],))
+                    conn.execute(
+                        "DELETE FROM messages WHERE folder = ? AND uid = ?",
+                        (kept, uid),
                     )
-                    for uid in uids:
-                        row = by_uid[uid]
-                        new_uid = mapping.get(uid)
-                        conn.execute("UPDATE moves SET undone = 1 WHERE id = ?", (row["id"],))
+                    if new_uid is not None:
+                        conn.execute(
+                            """
+                            INSERT OR REPLACE INTO messages (
+                                folder, uid, message_id, from_addr, from_domain, subject,
+                                date_ts, date_raw, size, flags, list_unsubscribe, scanned_at
+                            ) VALUES (?, ?, ?, ?, '', ?, ?, '', ?, '', 0, ?)
+                            """,
+                            (
+                                inbox,
+                                new_uid,
+                                row.get("message_id"),
+                                row.get("from_addr"),
+                                row.get("subject"),
+                                row.get("date_ts"),
+                                row.get("size"),
+                                _now(),
+                            ),
+                        )
+                    audit_log(
+                        profile.audit_path,
+                        "undo_kept",
+                        account=profile.name,
+                        move_id=row["id"],
+                        from_folder=kept,
+                        from_uid=uid,
+                        to_folder=inbox,
+                        to_uid=new_uid,
+                    )
+                    restored += 1
+                    if progress_cb:
+                        progress_cb(
+                            folder=kept,
+                            moved_this_job=restored,
+                            errors_this_job=len(errors),
+                            remaining_estimate=max(0, len(rows) - restored),
+                        )
+            except Exception as batch_err:
+                for uid in uids:
+                    row = by_uid[uid]
+                    try:
+                        new_uid = with_backoff(
+                            lambda u=uid, f=inbox: client.move_uid(u, f)
+                        )
+                        conn.execute(
+                            "UPDATE moves SET undone = 1 WHERE id = ?", (row["id"],)
+                        )
                         conn.execute(
                             "DELETE FROM messages WHERE folder = ? AND uid = ?",
-                            (dest, uid),
+                            (kept, uid),
                         )
+                        if new_uid is not None:
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO messages (
+                                    folder, uid, message_id, from_addr, from_domain, subject,
+                                    date_ts, date_raw, size, flags, list_unsubscribe, scanned_at
+                                ) VALUES (?, ?, ?, ?, '', ?, ?, '', ?, '', 0, ?)
+                                """,
+                                (
+                                    inbox,
+                                    new_uid,
+                                    row.get("message_id"),
+                                    row.get("from_addr"),
+                                    row.get("subject"),
+                                    row.get("date_ts"),
+                                    row.get("size"),
+                                    _now(),
+                                ),
+                            )
                         audit_log(
                             profile.audit_path,
                             "undo_kept",
                             account=profile.name,
                             move_id=row["id"],
-                            from_folder=dest,
+                            from_folder=kept,
                             from_uid=uid,
-                            to_folder=source_folder,
+                            to_folder=inbox,
                             to_uid=new_uid,
                         )
                         restored += 1
+                    except Exception as e:
+                        errors.append(
+                            {
+                                "id": row["id"],
+                                "error": str(e),
+                                "batch_error": str(batch_err),
+                            }
+                        )
+            conn.commit()
+        for row in rows:
+            if row.get("dest_uid") is None:
+                errors.append({"id": row["id"], "error": "missing dest_uid; undo manually"})
+    finally:
+        client.close()
+        conn.close()
+    return {
+        "restored": restored,
+        "errors": errors,
+        "move_batch_size": batch_size,
+        "dest_folder": inbox,
+        "source_folder": kept,
+    }
+
+
+def restore_kept_to_inbox(
+    profile: Profile,
+    confirm: str,
+    *,
+    limit: int | None = None,
+    progress_cb: Any | None = None,
+    drain_live: bool = True,
+) -> dict[str, Any]:
+    """End-of-round: return Intentionally Kept mail to Inbox.
+
+    Uses the moves audit first, then optionally drains any leftover UIDs still
+    present in the kept folder on the server (live IMAP search).
+    """
+    if not _kept_restore_confirm_ok(confirm):
+        raise ValueError(
+            "Refusing restore: type exactly "
+            f"{CONFIRM_RESTORE_INBOX!r} or {CONFIRM_UNDO_KEPT!r} to confirm. "
+            f"Got {confirm!r}."
+        )
+    out = undo_from_kept(
+        profile, confirm=confirm, limit=limit, progress_cb=progress_cb
+    )
+    live_moved = 0
+    live_errors: list[dict] = []
+    if drain_live and limit is None:
+        provider = get_provider(profile.provider)
+        client = provider.connect(profile)
+        conn = init_db(profile.db_path)
+        kept = profile.kept_folder
+        inbox = profile.inbox_folder
+        batch_size = max(1, int(profile.move_batch_size))
+        try:
+            with_backoff(lambda: client.select(kept, readonly=False))
+            client.ensure_folder(inbox)
+            leftover = with_backoff(lambda: client.uid_search_all_above(0))
+            for batch in _chunk_rows([{"uid": u} for u in leftover], batch_size):
+                uids = [int(r["uid"]) for r in batch]
+                try:
+                    mapping = with_backoff(
+                        lambda u=uids, f=inbox: client.move_uids(u, f)
+                    )
+                    for uid in uids:
+                        new_uid = mapping.get(uid)
+                        conn.execute(
+                            "DELETE FROM messages WHERE folder = ? AND uid = ?",
+                            (kept, uid),
+                        )
+                        audit_log(
+                            profile.audit_path,
+                            "restore_kept_live",
+                            account=profile.name,
+                            from_folder=kept,
+                            from_uid=uid,
+                            to_folder=inbox,
+                            to_uid=new_uid,
+                        )
+                        live_moved += 1
+                        if progress_cb:
+                            progress_cb(
+                                folder=kept,
+                                moved_this_job=int(out.get("restored") or 0) + live_moved,
+                                errors_this_job=len(out.get("errors") or [])
+                                + len(live_errors),
+                            )
                 except Exception as batch_err:
                     for uid in uids:
-                        row = by_uid[uid]
                         try:
                             new_uid = with_backoff(
-                                lambda u=uid, f=source_folder: client.move_uid(u, f)
-                            )
-                            conn.execute(
-                                "UPDATE moves SET undone = 1 WHERE id = ?", (row["id"],)
+                                lambda u=uid, f=inbox: client.move_uid(u, f)
                             )
                             conn.execute(
                                 "DELETE FROM messages WHERE folder = ? AND uid = ?",
-                                (dest, uid),
+                                (kept, uid),
                             )
                             audit_log(
                                 profile.audit_path,
-                                "undo_kept",
+                                "restore_kept_live",
                                 account=profile.name,
-                                move_id=row["id"],
-                                from_folder=dest,
+                                from_folder=kept,
                                 from_uid=uid,
-                                to_folder=source_folder,
+                                to_folder=inbox,
                                 to_uid=new_uid,
                             )
-                            restored += 1
+                            live_moved += 1
                         except Exception as e:
-                            errors.append(
+                            live_errors.append(
                                 {
-                                    "id": row["id"],
+                                    "uid": uid,
                                     "error": str(e),
                                     "batch_error": str(batch_err),
                                 }
                             )
                 conn.commit()
-    finally:
-        client.close()
-        conn.close()
-    return {"restored": restored, "errors": errors, "move_batch_size": batch_size}
+        finally:
+            client.close()
+            conn.close()
+    out["live_moved"] = live_moved
+    out["live_errors"] = live_errors
+    out["restored"] = int(out.get("restored") or 0) + live_moved
+    if live_errors:
+        out.setdefault("errors", []).extend(live_errors)
+    return out
 
 
-def ready_to_trash(profile: Profile, confirm: str, batch_size: int = 100) -> dict[str, Any]:
+def ready_to_trash(
+    profile: Profile,
+    confirm: str,
+    batch_size: int = 100,
+    *,
+    drain: bool = False,
+    progress_cb: Any | None = None,
+) -> dict[str, Any]:
     if confirm.strip() != CONFIRM_TRASH:
         raise ValueError(
             f"Refusing trash: type exactly {CONFIRM_TRASH!r} to confirm. Got {confirm!r}."
@@ -798,60 +1031,34 @@ def ready_to_trash(profile: Profile, confirm: str, batch_size: int = 100) -> dic
     imap_batch = max(1, min(int(batch_size), int(profile.move_batch_size)))
     try:
         with_backoff(lambda: client.select(profile.ready_folder, readonly=False))
-        rows = [
-            dict(r)
-            for r in conn.execute(
-                """
-                SELECT id, dest_uid, source_folder, message_id, from_addr, subject, date_ts, size, rule_id
-                FROM moves
-                WHERE undone = 0 AND dest_folder = ? AND dest_uid IS NOT NULL
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (profile.ready_folder, batch_size),
-            ).fetchall()
-        ]
-        for batch_rows in _chunk_rows(rows, imap_batch):
-            uids = [int(r["dest_uid"]) for r in batch_rows]
-            by_uid = {int(r["dest_uid"]): r for r in batch_rows}
-            try:
-                mapping = with_backoff(
-                    lambda u=uids: client.move_uids(u, profile.trash_folder)
-                )
-                for uid in uids:
-                    row = by_uid[uid]
-                    trash_uid = mapping.get(uid)
-                    conn.execute(
-                        """
-                        UPDATE moves
-                        SET dest_folder = ?, dest_uid = ?, moved_at = ?
-                        WHERE id = ?
-                        """,
-                        (profile.trash_folder, trash_uid, _now(), row["id"]),
+        client.ensure_folder(profile.trash_folder)
+        while True:
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    """
+                    SELECT id, dest_uid, source_folder, message_id, from_addr, subject, date_ts, size, rule_id
+                    FROM moves
+                    WHERE undone = 0 AND dest_folder = ? AND dest_uid IS NOT NULL
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (profile.ready_folder, batch_size),
+                ).fetchall()
+            ]
+            if not rows:
+                break
+            moved_before = moved
+            for batch_rows in _chunk_rows(rows, imap_batch):
+                uids = [int(r["dest_uid"]) for r in batch_rows]
+                by_uid = {int(r["dest_uid"]): r for r in batch_rows}
+                try:
+                    mapping = with_backoff(
+                        lambda u=uids: client.move_uids(u, profile.trash_folder)
                     )
-                    conn.execute(
-                        "DELETE FROM messages WHERE folder = ? AND uid = ?",
-                        (profile.ready_folder, uid),
-                    )
-                    audit_log(
-                        profile.audit_path,
-                        "to_trash",
-                        account=profile.name,
-                        move_id=row["id"],
-                        from_folder=profile.ready_folder,
-                        from_uid=uid,
-                        trash_folder=profile.trash_folder,
-                        trash_uid=trash_uid,
-                        warning="Yahoo Trash auto-empties after 7 days and cannot be changed.",
-                    )
-                    moved += 1
-            except Exception as batch_err:
-                for uid in uids:
-                    row = by_uid[uid]
-                    try:
-                        trash_uid = with_backoff(
-                            lambda u=uid: client.move_uid(u, profile.trash_folder)
-                        )
+                    for uid in uids:
+                        row = by_uid[uid]
+                        trash_uid = mapping.get(uid)
                         conn.execute(
                             """
                             UPDATE moves
@@ -876,16 +1083,58 @@ def ready_to_trash(profile: Profile, confirm: str, batch_size: int = 100) -> dic
                             warning="Yahoo Trash auto-empties after 7 days and cannot be changed.",
                         )
                         moved += 1
-                    except Exception as e:
-                        errors.append(
-                            {
-                                "id": row["id"],
-                                "uid": uid,
-                                "error": str(e),
-                                "batch_error": str(batch_err),
-                            }
-                        )
-            conn.commit()
+                        if progress_cb:
+                            progress_cb(
+                                folder=profile.ready_folder,
+                                moved_this_job=moved,
+                                errors_this_job=len(errors),
+                            )
+                except Exception as batch_err:
+                    for uid in uids:
+                        row = by_uid[uid]
+                        try:
+                            trash_uid = with_backoff(
+                                lambda u=uid: client.move_uid(u, profile.trash_folder)
+                            )
+                            conn.execute(
+                                """
+                                UPDATE moves
+                                SET dest_folder = ?, dest_uid = ?, moved_at = ?
+                                WHERE id = ?
+                                """,
+                                (profile.trash_folder, trash_uid, _now(), row["id"]),
+                            )
+                            conn.execute(
+                                "DELETE FROM messages WHERE folder = ? AND uid = ?",
+                                (profile.ready_folder, uid),
+                            )
+                            audit_log(
+                                profile.audit_path,
+                                "to_trash",
+                                account=profile.name,
+                                move_id=row["id"],
+                                from_folder=profile.ready_folder,
+                                from_uid=uid,
+                                trash_folder=profile.trash_folder,
+                                trash_uid=trash_uid,
+                                warning="Yahoo Trash auto-empties after 7 days and cannot be changed.",
+                            )
+                            moved += 1
+                        except Exception as e:
+                            errors.append(
+                                {
+                                    "id": row["id"],
+                                    "uid": uid,
+                                    "error": str(e),
+                                    "batch_error": str(batch_err),
+                                }
+                            )
+                conn.commit()
+            if not drain:
+                break
+            # Avoid spinning forever when every candidate in this page failed.
+            if moved == moved_before:
+                break
     finally:
         client.close()
         conn.close()
@@ -898,6 +1147,9 @@ def ready_to_trash(profile: Profile, confirm: str, batch_size: int = 100) -> dic
         ),
         "batch_size": batch_size,
         "move_batch_size": imap_batch,
+        "drain": drain,
+        "dest_folder": profile.trash_folder,
+        "source_folder": profile.ready_folder,
     }
 
 

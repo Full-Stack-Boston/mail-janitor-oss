@@ -363,6 +363,10 @@ def test_apply_undo_kept_and_trash(profile, monkeypatch):
     assert apply.undo_from_kept(
         profile, apply.CONFIRM_UNDO_KEPT, move_ids=[mid], limit=1
     )["restored"] == 1
+    mid = _insert_move(profile, dest=profile.kept_folder)
+    assert apply.undo_from_kept(
+        profile, apply.CONFIRM_RESTORE_INBOX, move_ids=[mid], limit=1
+    )["restored"] == 1
     missing = _insert_move(profile, dest=profile.kept_folder)
     c = init_db(profile.db_path)
     c.execute("UPDATE moves SET dest_uid=NULL WHERE id=?", (missing,))
@@ -375,10 +379,52 @@ def test_apply_undo_kept_and_trash(profile, monkeypatch):
         apply.ready_to_trash(profile, "bad")
     out = apply.ready_to_trash(profile, apply.CONFIRM_TRASH, batch_size=1)
     assert out["moved_to_trash"] == 1
+    # Drain empties remaining ready moves across batches.
+    _insert_move(profile, uid=201)
+    _insert_move(profile, uid=202)
+    beats = []
+    drained = apply.ready_to_trash(
+        profile,
+        apply.CONFIRM_TRASH,
+        batch_size=1,
+        drain=True,
+        progress_cb=lambda **k: beats.append(k),
+    )
+    assert drained["moved_to_trash"] >= 2
+    assert drained["drain"] is True
+    assert beats
     assert apply._chunk_rows([{"x": 1}, {"x": 2}], 1) == [
         [{"x": 1}],
         [{"x": 2}],
     ]
+
+    # End-stage restore with live IMAP leftover sweep + progress callback.
+    mid = _insert_move(profile, dest=profile.kept_folder, uid=301)
+    client.search = [301, 777]
+    beats = []
+    restored = apply.restore_kept_to_inbox(
+        profile,
+        apply.CONFIRM_RESTORE_INBOX,
+        drain_live=True,
+        progress_cb=lambda **k: beats.append(k),
+    )
+    assert restored["restored"] >= 1
+    assert "live_moved" in restored
+    assert beats
+    # Live drain batch fails then per-UID succeeds.
+    client.move_many_error = ValueError("batch")
+    client.move_one_error = None
+    client.search = [888]
+    live_ok = apply.restore_kept_to_inbox(
+        profile, apply.CONFIRM_RESTORE_INBOX, drain_live=True
+    )
+    assert live_ok["live_moved"] >= 1
+    client.move_many_error = None
+    pf = apply.preflight_end_stage(profile)
+    assert "kept_count" in pf and "ready_count" in pf
+    assert pf["confirm_restore_inbox"] == apply.CONFIRM_RESTORE_INBOX
+    with pytest.raises(ValueError):
+        apply.restore_kept_to_inbox(profile, "nope")
 
 
 def test_apply_undo_and_trash_fallback_errors(profile, monkeypatch):
@@ -401,6 +447,21 @@ def test_apply_undo_and_trash_fallback_errors(profile, monkeypatch):
     assert apply.undo_from_kept(profile, apply.CONFIRM_UNDO_KEPT)["errors"]
     _insert_move(profile)
     assert apply.ready_to_trash(profile, apply.CONFIRM_TRASH)["errors"]
+
+    # Live-drain fallback errors when batch + single-UID moves fail.
+    client.move_many_error = ValueError("batch")
+    client.move_one_error = ValueError("one")
+    client.search = [9001]
+    out = apply.restore_kept_to_inbox(
+        profile, apply.CONFIRM_RESTORE_INBOX, drain_live=True
+    )
+    assert out["live_errors"] or out["errors"]
+    # Drain stuck page (all errors) should stop without looping forever.
+    _insert_move(profile, uid=9100)
+    stuck = apply.ready_to_trash(
+        profile, apply.CONFIRM_TRASH, batch_size=1, drain=True
+    )
+    assert stuck["drain"] is True
 
 
 def test_firewall_status_process_watch_release(profile, monkeypatch):
